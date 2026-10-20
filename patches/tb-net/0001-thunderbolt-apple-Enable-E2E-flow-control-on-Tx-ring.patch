@@ -1,0 +1,75 @@
+From 151a5b8149697e5965eadde64e58460e06e8d7c3 Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 15:39:07 +0000
+Subject: [PATCH 1/3] thunderbolt: apple: Enable E2E flow control on Tx rings
+ too
+
+End-to-end flow control on the Apple NHI only works when it is enabled on
+both rings of a channel: the Rx ring returns credits to the remote end,
+and the remote Tx ring only waits for them when its own E2E bit is set.
+With E2E enabled on the Rx ring alone, which is what the NHI core and
+thunderbolt-net program, the receiving ring is programmed correctly
+(options 0x90001000: valid, E2E, Tx HopID 1) but the sending Tx ring
+(0x80000000) never stalls on credits. Once the receiver falls behind it
+runs out of descriptors and drops frames; thunderbolt-net counts them as
+rx_missed_errors and TCP retransmits. Turning the e2e module parameter of
+thunderbolt-net off makes no difference.
+
+Add a tx_e2e flag to struct tb_nhi for host interfaces that need
+RING_FLAG_E2E on the Tx ring as well, and set it for the Apple NHI.
+Users of E2E flow control can then enable it on their Tx ring too. Hosts
+that do not set the flag keep the current behaviour: the Falcon Ridge
+E2E workaround, for example, sends its Rx credits to an unused HopID, so
+a Tx ring that waited for them would stall.
+
+The new member sits in the padding after iommu_dma_protection, so the
+layout of struct tb_nhi does not change.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ drivers/thunderbolt/apple.c | 5 +++++
+ include/linux/thunderbolt.h | 4 ++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/drivers/thunderbolt/apple.c b/drivers/thunderbolt/apple.c
+index 530008cc8..1e6d2e583 100644
+--- a/drivers/thunderbolt/apple.c
++++ b/drivers/thunderbolt/apple.c
+@@ -531,6 +531,11 @@ static int apple_nhi_probe(struct platform_device *pdev)
+ 
+ 	spin_lock_init(&anhi->nhi.lock);
+ 	anhi->nhi.iommu_dma_protection = true;
++	/*
++	 * A Tx ring ignores the credits returned by the remote Rx ring unless
++	 * E2E flow control is enabled on the Tx ring too, as macOS does.
++	 */
++	anhi->nhi.tx_e2e = true;
+ 	anhi->nhi.ops = &apple_nhi_ops;
+ 	anhi->nhi.ring_layout = &apple_nhi_ring_layout;
+ 	anhi->nhi.iobase = anhi->nhi_base;
+diff --git a/include/linux/thunderbolt.h b/include/linux/thunderbolt.h
+index 840115962..ce58caf40 100644
+--- a/include/linux/thunderbolt.h
++++ b/include/linux/thunderbolt.h
+@@ -511,6 +511,9 @@ void tb_service_properties_changed(struct tb_service *svc);
+  * @going_away: The host controller device is about to disappear so when
+  *		this flag is set, avoid touching the hardware anymore.
+  * @iommu_dma_protection: An IOMMU will isolate external-facing ports.
++ * @tx_e2e: Tx rings only wait for end-to-end flow control credits when
++ *	    %RING_FLAG_E2E is set on them as well. Without it the sender
++ *	    ignores the credits and overruns the receiving ring.
+  * @interrupt_work: Work scheduled to handle ring interrupt when no
+  *		    MSI-X is used.
+  * @hop_count: Number of rings (end point hops) supported by NHI.
+@@ -527,6 +530,7 @@ struct tb_nhi {
+ 	struct tb_ring **rx_rings;
+ 	bool going_away;
+ 	bool iommu_dma_protection;
++	bool tx_e2e;
+ 	struct work_struct interrupt_work;
+ 	u32 hop_count;
+ 	unsigned long quirks;
+-- 
+2.56.0
+

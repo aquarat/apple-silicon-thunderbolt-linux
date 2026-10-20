@@ -1,0 +1,70 @@
+From b0998b20240317511853216274225079fc1b4e7f Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 15:39:07 +0000
+Subject: [PATCH 2/3] net: thunderbolt: Enable E2E flow control on the Tx ring
+ if required
+
+When full end-to-end flow control is negotiated, thunderbolt-net enables
+it on the Rx ring only. On host interfaces that only honour the credits
+on Tx rings that have E2E flow control enabled as well (tb_nhi::tx_e2e,
+the Apple NHI), the sender then ignores the credits and overruns the
+receiver's ring once that falls behind.
+
+Enable E2E on the Tx ring too when the host interface requires it.
+
+Same-host loopback between two USB4 ports of a Mac Studio (M1 Max,
+20 Gb/s x2, MTU 65522, iperf3, 15 s per run; frames dropped by the
+receiving ring in brackets):
+
+                    before                   after
+  single stream     4.2 Gb/s (5128)          4.8 Gb/s (0)
+  4 streams         4.5 Gb/s (18216)         5.0 Gb/s (0)
+  bidirectional     2.4 + 2.3 Gb/s (5252)    2.3 + 2.3 Gb/s (0)
+
+TCP retransmits drop from 1600-5600 to 200-700 per run.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ drivers/net/thunderbolt/main.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/thunderbolt/main.c b/drivers/net/thunderbolt/main.c
+index 82cef2009..071aff21b 100644
+--- a/drivers/net/thunderbolt/main.c
++++ b/drivers/net/thunderbolt/main.c
+@@ -943,12 +943,19 @@ static int tbnet_open(struct net_device *dev)
+ 	u16 sof_mask, eof_mask;
+ 	struct tb_ring *ring;
+ 	unsigned int flags;
++	bool full_e2e;
+ 	int hopid;
+ 
+ 	netif_carrier_off(dev);
+ 
+-	ring = tb_ring_alloc_tx(xd->tb->nhi, -1, TBNET_RING_SIZE,
+-				RING_FLAG_FRAME);
++	/* Only enable full E2E if the other end supports it too */
++	full_e2e = tbnet_e2e && net->svc->prtcstns & TBNET_E2E;
++
++	flags = RING_FLAG_FRAME;
++	if (full_e2e && xd->tb->nhi->tx_e2e)
++		flags |= RING_FLAG_E2E;
++
++	ring = tb_ring_alloc_tx(xd->tb->nhi, -1, TBNET_RING_SIZE, flags);
+ 	if (!ring) {
+ 		netdev_err(dev, "failed to allocate Tx ring\n");
+ 		return -ENOMEM;
+@@ -968,8 +975,7 @@ static int tbnet_open(struct net_device *dev)
+ 	eof_mask = BIT(TBIP_PDF_FRAME_END);
+ 
+ 	flags = RING_FLAG_FRAME;
+-	/* Only enable full E2E if the other end supports it too */
+-	if (tbnet_e2e && net->svc->prtcstns & TBNET_E2E)
++	if (full_e2e)
+ 		flags |= RING_FLAG_E2E;
+ 
+ 	ring = tb_ring_alloc_rx(xd->tb->nhi, -1, TBNET_RING_SIZE, flags,
+-- 
+2.56.0
+

@@ -39,6 +39,7 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
+| `patches/tb-net/` | separate 3-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
 | `tools/` | test tools: `tb-soak.sh` (filesystem soak with software replugs), `plot-soak.py` (graphs), `tb-port-cycle` / `tipd-4cc` (software replug through the port's USB-C PD controller; the address table is for the Mac Studio) |
@@ -179,6 +180,52 @@ In-kernel alternatives, evaluated (none needed now):
   is a separate decision.
 - `nvme_core.default_ps_max_latency_us=0` works but turns APST off for the
   internal drive too.
+
+## Thunderbolt networking (patches/tb-net)
+
+`thunderbolt-net` (IP over a USB4/Thunderbolt host-to-host cable) runs on the
+Apple NHI, but loses frames whenever the receiver falls behind. The driver
+enables end-to-end (E2E) flow control on its receive ring only, and the Apple
+NHI's transmit ring ignores the returned credits unless E2E is enabled on it
+as well (the register read-back shows the receive ring set up correctly and the
+transmit ring without its E2E bit). macOS enables E2E on both. The series on
+asahi-wip 7.2.11 (independent of the APCIEC series):
+
+1. `thunderbolt: apple: Enable E2E flow control on Tx rings too` adds a
+   `tx_e2e` flag to `struct tb_nhi` and sets it for the Apple NHI. No change
+   for other host interfaces. The Falcon Ridge E2E workaround, for one, sends
+   its credits nowhere, so a credit-gated transmit ring would stall against it.
+2. `net: thunderbolt: Enable E2E flow control on the Tx ring if required`.
+3. `arm64: dts: apple: t600x: Mark the USB4 NHIs as DMA coherent`.
+
+Measured with a USB4 cable between two ports of one Mac Studio (M1 Max, one end
+in a network namespace, 20 Gb/s x2, MTU 65522, iperf3):
+
+| | per direction | bidirectional | lost frames |
+|---|---|---|---|
+| unpatched (non-coherent NHI) | 3.4 Gb/s | | thousands per run |
+| + dma-coherent | 4.2 Gb/s | 2.4 + 2.3 Gb/s | thousands per run |
+| + TX E2E (patches 1-2) | 4.8 Gb/s | 2.3 + 2.3 Gb/s | 0 |
+| + RX ring 1024, threaded NAPI, GRO off | 8.2 Gb/s | 7.4 + 7.4 Gb/s | 0, no TCP retransmits |
+
+A 1 h bidirectional run at the last setting averaged 7.4 + 7.35 Gb/s with no
+lost frames, one TCP retransmit, no link drops and 24 SHA-256 checked 1 GiB
+transfers intact. Threaded NAPI (`echo 1 > /sys/class/net/<if>/threaded`) matters
+because the interrupt controller cannot be pinned and delivers most ring
+interrupts to the efficiency cores. GRO reorders segments on this path, which
+causes spurious retransmits; at a 64 KiB MTU it has nothing to merge anyway.
+The RX ring size is a compile-time constant (`TBNET_RING_SIZE`, 256 upstream).
+The remaining limit is per-frame DMA unmapping through the strict NHI IOMMU
+domain (one receive thread at ~96 % of a core).
+
+Patches 1 and 2 were boot-tested together on 7.2.11: the TX ring options
+read back with the E2E bit set (0x90000000; 0x80000000 with an unpatched
+thunderbolt-net), 0 lost frames, 5.1 / 4.7 Gb/s at the stock 256-entry RX ring
+and 7.3 Gb/s per direction (7.0 + 7.0 Gb/s bidirectional, no retransmits) with
+threaded NAPI and GRO off. A tunnelled NVMe drive on another port of the same
+machine kept working through three replugs (3.1 GB/s reads, fio verify clean).
+The dma-coherent property was run on hardware on the two NHIs used for the
+cable (ports 1 and 2); the patch sets it on all of them. Not yet tested Mac-to-Mac or against Intel/AMD hosts.
 
 ## Status and known issues
 

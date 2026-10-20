@@ -1,0 +1,59 @@
+From 6b7346eefec31ecf33dd5b23c9e639b057e6288f Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 15:43:33 +0000
+Subject: [PATCH 3/3] arm64: dts: apple: t600x: Mark the USB4 NHIs as DMA
+ coherent
+
+The USB4 host interfaces of T600x sit on the same coherent fabric as the
+tunnelled PCIe controllers, which are already marked dma-coherent. Without
+the property every 4 KiB frame of a DMA ring (thunderbolt-net, the control
+ring) gets cache maintenance. With it, thunderbolt-net between two ports
+of a Mac Studio (M1 Max) goes from 3.4 to 4.0 Gb/s per direction, and a
+1 h bidirectional soak with periodic SHA-256 checked transfers shows no
+corruption.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/apple/t600x-dieX.dtsi | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t600x-dieX.dtsi b/arch/arm64/boot/dts/apple/t600x-dieX.dtsi
+index 9f9ca9d46..36a47cf1c 100644
+--- a/arch/arm64/boot/dts/apple/t600x-dieX.dtsi
++++ b/arch/arm64/boot/dts/apple/t600x-dieX.dtsi
+@@ -550,6 +550,7 @@ DIE_NODE(usb4_0_nhi): nhi@f00000 {
+ 				"rxring9", "rxring10", "rxring11";
+ 			iommus = <&DIE_NODE(usb4_0_dart) 1>,
+ 				 <&DIE_NODE(usb4_0_dart) 2>;
++			dma-coherent;
+ 			/* To be filled by the loader */
+ 			apple,thunderbolt-drom = [00];
+ 		};
+@@ -703,6 +704,7 @@ DIE_NODE(usb4_1_nhi): nhi@f00000 {
+ 				"rxring9", "rxring10", "rxring11";
+ 			iommus = <&DIE_NODE(usb4_1_dart) 1>,
+ 				 <&DIE_NODE(usb4_1_dart) 2>;
++			dma-coherent;
+ 			/* To be filled by the loader */
+ 			apple,thunderbolt-drom = [00];
+ 		};
+@@ -856,6 +858,7 @@ DIE_NODE(usb4_2_nhi): nhi@f00000 {
+ 				"rxring9", "rxring10", "rxring11";
+ 			iommus = <&DIE_NODE(usb4_2_dart) 1>,
+ 				 <&DIE_NODE(usb4_2_dart) 2>;
++			dma-coherent;
+ 			/* To be filled by the loader */
+ 			apple,thunderbolt-drom = [00];
+ 		};
+@@ -1009,6 +1012,7 @@ DIE_NODE(usb4_3_nhi): nhi@f00000 {
+ 				"rxring9", "rxring10", "rxring11";
+ 			iommus = <&DIE_NODE(usb4_3_dart) 1>,
+ 				 <&DIE_NODE(usb4_3_dart) 2>;
++			dma-coherent;
+ 			/* To be filled by the loader */
+ 			apple,thunderbolt-drom = [00];
+ 		};
+-- 
+2.56.0
+

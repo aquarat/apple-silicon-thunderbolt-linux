@@ -187,6 +187,9 @@ Tested (Mac Studio M1 Max, port 3, ASM2464PD + Samsung SM961, asahi-wip
 QD64x4 295k IOPS, crc32c write/verify clean, 10/10 software replugs with the
 namespace back in 3.8-3.9 s, 5 min idle without link loss, 1 h filesystem
 soak with 4 replugs passed (graphs: [docs/results/soak-20261020](docs/results/soak-20261020)).
+The same 1 h soak passed again with the driver built into the packaged
+apple-silicon-kernel-plus kernel (7.2.11-900.asahiwip.plus1, graphs:
+[docs/results/soak-20261020-kernel-plus](docs/results/soak-20261020-kernel-plus)).
 An earlier version of the driver ran a 2 h soak (7 rounds, 3 replugs) and
 6.4 h of a 10 h soak before the known issue below ended it.
 

@@ -1,0 +1,169 @@
+From e0bb75c3cc1d818d5650716f73e2e5df8a578039 Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 23:00:18 +0000
+Subject: [PATCH] net: thunderbolt: Make oversized TSO packets forwardable
+
+A ThunderboltIP peer does not segment TSO packets: it splits them into
+Thunderbolt frames, fills in the TCP checksum over the whole packet and
+the receiver reassembles them into one packet of up to 64 KiB. Local
+delivery takes such a packet as is, but a bridge or a router cannot
+forward it to an interface with a normal MTU: the bridge drops it in
+is_skb_forwardable() and IPv4/IPv6 forwarding answer with "fragmentation
+needed". With a thunderbolt-net interface in a bridge with an Ethernet
+uplink, TCP from the peer to the LAN runs at a few hundred kB/s (only
+segments that happened to fit get through), unless TSO is turned off on
+the peer.
+
+Make such packets GSO packets on receive, the way GRO builds them: when a
+TCP packet is larger than the MTU, verify the checksum the peer computed,
+replace it with the pseudo header checksum, set CHECKSUM_PARTIAL and
+gso_size/gso_segs/gso_type (DODGY, as the headers come from the peer).
+The stack then segments the packet on the way out, in software or by the
+egress device's TSO. The MSS is derived from the local MTU, which is at
+most what the peer's segments would have used on a link with matching
+MTUs. Local delivery is unchanged apart from the checksum being verified
+here instead of by TCP.
+
+Measured on M1 Max (Apple USB4 NHI) to M1 Max over 2x20 Gb/s, MTU 1500,
+peer TSO on, from the peer through a bridge into a veth (MTU 1500):
+
+  before: 0.01 Gb/s (418 retransmits)
+  after:  19.1-19.5 Gb/s, 0 retransmits, IPv4 and IPv6
+
+and to a Wi-Fi client behind the bridge's Ethernet uplink 1.3 Mbit/s
+before, 42 Mbit/s (that client's Wi-Fi rate) after.
+  peer TSO off (the workaround): 5.4 Gb/s
+
+Local delivery at the same time: 20.4-20.5 Gb/s before and after.
+sha256-checked 1 GiB transfers forwarded (IPv4 and IPv6) and delivered
+locally matched.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ drivers/net/thunderbolt/main.c | 93 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 93 insertions(+)
+
+diff --git a/drivers/net/thunderbolt/main.c b/drivers/net/thunderbolt/main.c
+index a05bb1a91..289b1766e 100644
+--- a/drivers/net/thunderbolt/main.c
++++ b/drivers/net/thunderbolt/main.c
+@@ -22,8 +22,10 @@
+ #include <linux/uuid.h>
+ #include <linux/workqueue.h>
+ 
++#include <net/ip.h>
+ #include <net/ip6_checksum.h>
+ #include <net/page_pool/helpers.h>
++#include <net/tcp.h>
+ 
+ #include "trace.h"
+ 
+@@ -829,6 +831,96 @@ static bool tbnet_check_frame(struct tbnet *net, const struct tbnet_frame *tf,
+ 	return true;
+ }
+ 
++/*
++ * A peer that sends TSO packets splits them into Thunderbolt frames
++ * without segmenting them, so a TCP packet received here can be larger
++ * than the MTU. The local stack accepts that, but such a packet cannot be
++ * forwarded (bridged or routed) to an interface with a normal MTU and is
++ * dropped there. Turn it into a GSO packet, the way GRO does, so the stack
++ * segments it on the way out. The MSS is derived from our MTU, which the
++ * peer's segments would not have exceeded either.
++ *
++ * The peer computed the TCP checksum over the whole packet; verify it
++ * here, because the segments get new checksums later.
++ */
++static void tbnet_rx_gso(struct tbnet *net, struct sk_buff *skb)
++{
++	unsigned int mtu = net->dev->mtu, thoff, hdrlen, mss, len;
++	struct skb_shared_info *shinfo;
++	unsigned int gso_type;
++	struct tcphdr *th;
++	__wsum csum;
++
++	if (skb->len <= mtu)
++		return;
++
++	if (skb->protocol == htons(ETH_P_IP)) {
++		const struct iphdr *iph;
++
++		if (!pskb_may_pull(skb, sizeof(*iph)))
++			return;
++		iph = (const struct iphdr *)skb->data;
++		if (iph->ihl < 5 || iph->protocol != IPPROTO_TCP ||
++		    ip_is_fragment(iph) || ntohs(iph->tot_len) != skb->len)
++			return;
++		thoff = iph->ihl * 4;
++		gso_type = SKB_GSO_TCPV4;
++	} else if (skb->protocol == htons(ETH_P_IPV6)) {
++		const struct ipv6hdr *ip6h;
++
++		if (!pskb_may_pull(skb, sizeof(*ip6h)))
++			return;
++		ip6h = (const struct ipv6hdr *)skb->data;
++		if (ip6h->nexthdr != IPPROTO_TCP ||
++		    ntohs(ip6h->payload_len) + sizeof(*ip6h) != skb->len)
++			return;
++		thoff = sizeof(*ip6h);
++		gso_type = SKB_GSO_TCPV6;
++	} else {
++		return;
++	}
++
++	if (!pskb_may_pull(skb, thoff + sizeof(*th)))
++		return;
++	th = (struct tcphdr *)(skb->data + thoff);
++	hdrlen = thoff + th->doff * 4;
++	if (th->doff < 5 || hdrlen >= mtu || !pskb_may_pull(skb, hdrlen))
++		return;
++	th = (struct tcphdr *)(skb->data + thoff);
++	mss = mtu - hdrlen;
++	len = skb->len - thoff;
++
++	csum = skb_checksum(skb, thoff, len, 0);
++	if (gso_type == SKB_GSO_TCPV4) {
++		const struct iphdr *iph = (const struct iphdr *)skb->data;
++
++		if (csum_tcpudp_magic(iph->saddr, iph->daddr, len,
++				      IPPROTO_TCP, csum))
++			return;
++		th->check = ~tcp_v4_check(len, iph->saddr, iph->daddr, 0);
++	} else {
++		const struct ipv6hdr *ip6h = (const struct ipv6hdr *)skb->data;
++
++		if (csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, len,
++				    IPPROTO_TCP, csum))
++			return;
++		th->check = ~tcp_v6_check(len, &ip6h->saddr, &ip6h->daddr, 0);
++	}
++
++	skb_reset_network_header(skb);
++	skb_set_transport_header(skb, thoff);
++	skb->ip_summed = CHECKSUM_PARTIAL;
++	skb->csum_start = skb_transport_header(skb) - skb->head;
++	skb->csum_offset = offsetof(struct tcphdr, check);
++
++	shinfo = skb_shinfo(skb);
++	shinfo->gso_size = mss;
++	shinfo->gso_segs = DIV_ROUND_UP(skb->len - hdrlen, mss);
++	shinfo->gso_type = gso_type | SKB_GSO_DODGY;
++	if (th->cwr)
++		shinfo->gso_type |= SKB_GSO_TCP_ECN;
++}
++
+ static int tbnet_poll(struct napi_struct *napi, int budget)
+ {
+ 	struct tbnet *net = container_of(napi, struct tbnet, napi);
+@@ -919,6 +1011,7 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
+ 			net->stats.rx_packets++;
+ 			net->stats.rx_bytes += skb->len;
+ 			skb->protocol = eth_type_trans(skb, net->dev);
++			tbnet_rx_gso(net, skb);
+ 			trace_tbnet_rx_skb(skb);
+ 			napi_gro_receive(&net->napi, skb);
+ 			net->skb = NULL;
+-- 
+2.56.0
+

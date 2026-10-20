@@ -39,7 +39,7 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
-| `patches/tb-net/` | separate 6-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
+| `patches/tb-net/` | separate 7-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI and GRO off for thunderbolt-net interfaces (see Thunderbolt networking) |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
@@ -215,6 +215,14 @@ asahi-wip 7.2.11 (independent of the APCIEC series):
    both ends the same MAC address, which also breaks bridging several Macs.
    The driver replaces placeholder UIDs by a salted SHA-256 of the serial
    number, keeping the port index in the low byte.
+7. `net: thunderbolt: Make oversized TSO packets forwardable`: a peer with
+   TSO on sends packets of up to 64 KiB, which the receiver reassembles as
+   one packet larger than the MTU. Local delivery takes it, but a bridge or
+   router drops it towards a normal-MTU interface, so a Mac bridged to a LAN
+   through another Mac crawled at about 1 Mbit/s unless TSO was off on the
+   sender (which caps it at about 5.4 Gb/s). Such packets are now verified
+   and marked as GSO packets on receive, like GRO does, and segmented on the
+   way out. Not Apple-specific.
 
 Measured with a USB4 cable between two ports of one Mac Studio (M1 Max, one end
 in a network namespace, 20 Gb/s x2, MTU 65522, iperf3):
@@ -273,6 +281,14 @@ got distinct XDomain UUIDs and MAC addresses and a bonded 20 Gb/s x2 link:
 21.4 / 19.9 Gb/s single stream at MTU 1500 with GRO off, 14.7 + 14.2 Gb/s
 bidirectional, no lost frames, 4 x 1 GiB SHA-256 checked transfers each way
 intact. Not yet tested against Intel/AMD hosts or macOS.
+Patch 7 was tested Mac-to-Mac with the receiving Mac bridging the cable
+to its Ethernet port and to a veth (MTU 1500), sender TSO on: forwarded
+throughput went from 0.01 Gb/s (hundreds of retransmits) to 19.1-19.5 Gb/s
+with no retransmits over IPv4 and IPv6 (5.4 Gb/s with the TSO-off
+workaround), a client behind the Ethernet uplink from 1.3 Mbit/s to its
+Wi-Fi rate, and local delivery stayed at 20.4-20.5 Gb/s. SHA-256 checked
+1 GiB transfers, forwarded and local, were intact. It works with GRO on or
+off on the receiver.
 
 ## Status and known issues
 

@@ -39,7 +39,7 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
-| `patches/tb-net/` | separate 5-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
+| `patches/tb-net/` | separate 6-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI for thunderbolt-net interfaces (see Thunderbolt networking) |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
@@ -207,6 +207,14 @@ asahi-wip 7.2.11 (independent of the APCIEC series):
    was cleared (16 KiB with `init_on_alloc=1` on a 16K-page kernel) and
    mapped and unmapped through the strict NHI IOMMU domain; that cost the
    receiving thread a whole core at 7-8 Gb/s. Not Apple-specific.
+6. `thunderbolt: apple: Derive a per-machine host router UID`: m1n1 copies
+   the host router DROM from the Apple device tree, whose UIDs are
+   placeholders shared by every Mac of a family (on some ports just the port
+   index). Two Macs cabled between the same port index then announce the same
+   XDomain UUID (treated as a loop, no lane bonding) and thunderbolt-net gives
+   both ends the same MAC address, which also breaks bridging several Macs.
+   The driver replaces placeholder UIDs by a salted SHA-256 of the serial
+   number, keeping the port index in the low byte.
 
 Measured with a USB4 cable between two ports of one Mac Studio (M1 Max, one end
 in a network namespace, 20 Gb/s x2, MTU 65522, iperf3):
@@ -250,7 +258,19 @@ and 7.3 Gb/s per direction (7.0 + 7.0 Gb/s bidirectional, no retransmits) with
 threaded NAPI and GRO off. A tunnelled NVMe drive on another port of the same
 machine kept working through three replugs (3.1 GB/s reads, fio verify clean).
 The dma-coherent property was run on hardware on the two NHIs used for the
-cable (ports 1 and 2); the patch sets it on all of them. Not yet tested Mac-to-Mac or against Intel/AMD hosts.
+cable (ports 1 and 2); the patch sets it on all of them.
+Patch 6 was boot-tested on top of 1-5 on the same machine: the three host
+routers with a cable got distinct UIDs that share the derived upper bits
+(deterministic, recomputed from the serial number in userspace), the
+thunderbolt-net MACs changed accordingly, the loopback ran at the same rates
+(21.3 / 21.5 Gb/s, 15.3 + 14.8 Gb/s bidirectional, no lost frames, SHA-256
+checked transfers intact) and the tunnelled NVMe drive was unaffected.
+Mac-to-Mac tested with patches 1-6 on both ends: an M1 Max Mac Studio and
+an M1 Max MacBook Pro (whose host routers carry the same placeholder UIDs)
+got distinct XDomain UUIDs and MAC addresses and a bonded 20 Gb/s x2 link:
+21.4 / 19.9 Gb/s single stream at MTU 1500 with GRO off, 14.7 + 14.2 Gb/s
+bidirectional, no lost frames, 4 x 1 GiB SHA-256 checked transfers each way
+intact. Not yet tested against Intel/AMD hosts or macOS.
 
 ## Status and known issues
 

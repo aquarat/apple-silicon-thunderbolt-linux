@@ -1,0 +1,65 @@
+From 0d79590cfd974900c6750af352b025134e7a7ae6 Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 18:56:44 +0000
+Subject: [PATCH 4/5] net: thunderbolt: Fix a lost Tx queue wakeup
+
+tbnet_start_xmit() stops the queue when there are not enough free Tx
+buffers, and tbnet_tx_callback() wakes it when it returns a buffer and
+at least half the ring is free. Nothing orders the two: if the
+completions for all outstanding frames run between the check in
+tbnet_start_xmit() and netif_stop_queue(), the callback sees a running
+queue and does nothing, and the queue then stays stopped with every
+buffer free. With no frame in flight there is no further completion to
+wake it, and the interface stops transmitting for good. The carrier
+stays up and nothing is logged.
+
+Seen after about 19 minutes of bidirectional iperf3 at 15 Gb/s per
+direction over a same-host loopback (two USB4 ports of an M1 Max): one
+side had its queue stopped with 255 of 256 Tx buffers free. Waking the
+queue by hand brought the link back.
+
+Check the free buffers again after stopping the queue, with barriers
+pairing the producer index update in the callback with the stop bit,
+as netif_txq_try_stop() does.
+
+Fixes: e69b6c02b4c3 ("net: Add support for networking over Thunderbolt cable")
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ drivers/net/thunderbolt/main.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/thunderbolt/main.c b/drivers/net/thunderbolt/main.c
+index 071aff21b..406977d0e 100644
+--- a/drivers/net/thunderbolt/main.c
++++ b/drivers/net/thunderbolt/main.c
+@@ -582,6 +582,8 @@ static void tbnet_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
+ 	/* Return buffer to the ring */
+ 	net->tx_ring.prod++;
+ 
++	/* Pairs with smp_mb__after_atomic() in tbnet_start_xmit() */
++	smp_mb();
+ 	if (tbnet_available_buffers(&net->tx_ring) >= TBNET_RING_SIZE / 2)
+ 		netif_wake_queue(net->dev);
+ }
+@@ -1154,7 +1156,16 @@ static netdev_tx_t tbnet_start_xmit(struct sk_buff *skb,
+ 	nframes = DIV_ROUND_UP(data_len, TBNET_MAX_PAYLOAD_SIZE);
+ 	if (tbnet_available_buffers(&net->tx_ring) < nframes) {
+ 		netif_stop_queue(net->dev);
+-		return NETDEV_TX_BUSY;
++		/*
++		 * tbnet_tx_callback() may have returned the buffers after the
++		 * check above, while the queue was still running, and then no
++		 * further completion would wake it. Check again now that the
++		 * queue is stopped. Pairs with the smp_mb() there.
++		 */
++		smp_mb__after_atomic();
++		if (tbnet_available_buffers(&net->tx_ring) < nframes)
++			return NETDEV_TX_BUSY;
++		netif_start_queue(net->dev);
+ 	}
+ 
+ 	frames[frame_index] = tbnet_get_tx_buffer(net);
+-- 
+2.56.0
+

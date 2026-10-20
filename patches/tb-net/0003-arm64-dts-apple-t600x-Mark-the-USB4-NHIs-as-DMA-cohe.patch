@@ -1,7 +1,7 @@
 From 6b7346eefec31ecf33dd5b23c9e639b057e6288f Mon Sep 17 00:00:00 2001
 From: aquarat <3090997+aquarat@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 15:43:33 +0000
-Subject: [PATCH 3/3] arm64: dts: apple: t600x: Mark the USB4 NHIs as DMA
+Subject: [PATCH 3/5] arm64: dts: apple: t600x: Mark the USB4 NHIs as DMA
  coherent
 
 The USB4 host interfaces of T600x sit on the same coherent fabric as the

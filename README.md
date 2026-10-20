@@ -39,8 +39,9 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
-| `patches/tb-net/` | separate 3-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
+| `patches/tb-net/` | separate 5-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
+| `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI for thunderbolt-net interfaces (see Thunderbolt networking) |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
 | `tools/` | test tools: `tb-soak.sh` (filesystem soak with software replugs), `plot-soak.py` (graphs), `tb-port-cycle` / `tipd-4cc` (software replug through the port's USB-C PD controller; the address table is for the Mac Studio) |
 | `docs/results/` | graphs from the soak runs quoted below |
@@ -197,6 +198,15 @@ asahi-wip 7.2.11 (independent of the APCIEC series):
    its credits nowhere, so a credit-gated transmit ring would stall against it.
 2. `net: thunderbolt: Enable E2E flow control on the Tx ring if required`.
 3. `arm64: dts: apple: t600x: Mark the USB4 NHIs as DMA coherent`.
+4. `net: thunderbolt: Fix a lost Tx queue wakeup`: a race between stopping
+   the Tx queue and the Tx completions could leave the queue stopped with
+   every buffer free, after which the interface never sent again (seen
+   after 19 minutes at 15 Gb/s per direction). Not Apple-specific.
+5. `net: thunderbolt: Use a page pool for Rx buffers`: Rx pages stay DMA
+   mapped and are recycled. Before, every 4 KiB frame took a new page that
+   was cleared (16 KiB with `init_on_alloc=1` on a 16K-page kernel) and
+   mapped and unmapped through the strict NHI IOMMU domain; that cost the
+   receiving thread a whole core at 7-8 Gb/s. Not Apple-specific.
 
 Measured with a USB4 cable between two ports of one Mac Studio (M1 Max, one end
 in a network namespace, 20 Gb/s x2, MTU 65522, iperf3):
@@ -207,6 +217,18 @@ in a network namespace, 20 Gb/s x2, MTU 65522, iperf3):
 | + dma-coherent | 4.2 Gb/s | 2.4 + 2.3 Gb/s | thousands per run |
 | + TX E2E (patches 1-2) | 4.8 Gb/s | 2.3 + 2.3 Gb/s | 0 |
 | + RX ring 1024, threaded NAPI, GRO off | 8.2 Gb/s | 7.4 + 7.4 Gb/s | 0, no TCP retransmits |
+| patches 1-5, ring 256, threaded NAPI, GRO off | 21.2 Gb/s | 15.2 + 14.6 Gb/s | 0, no TCP retransmits |
+
+With patches 1-5 the CPU cost at a fixed 5 Gb/s single stream drops from
+0.86 to 0.40 CPUs for the whole loopback (both ends and iperf3), and the
+receiving NAPI thread from 59 % to 17 % of a core. MTU 1500 gives the same
+rates. A bigger RX ring no longer helps much (512 or 1024 entries: same single
+stream, about 10 % more bidirectional), so the series leaves it at 256.
+A 30 min bidirectional run with patches 1-5 averaged 15.2 + 14.7 Gb/s
+(3.4 + 3.3 TB) with no lost frames, 28 TCP retransmits in total and every
+SHA-256 checked 1 GiB transfer intact, while a tunnelled NVMe drive on a
+third port ran a crc32c write/verify load (838 GB verified, no errors).
+Before patch 4 the same run stopped transmitting after 19 minutes.
 
 A 1 h bidirectional run at the last setting averaged 7.4 + 7.35 Gb/s with no
 lost frames, one TCP retransmit, no link drops and 24 SHA-256 checked 1 GiB
@@ -215,8 +237,11 @@ because the interrupt controller cannot be pinned and delivers most ring
 interrupts to the efficiency cores. GRO reorders segments on this path, which
 causes spurious retransmits; at a 64 KiB MTU it has nothing to merge anyway.
 The RX ring size is a compile-time constant (`TBNET_RING_SIZE`, 256 upstream).
-The remaining limit is per-frame DMA unmapping through the strict NHI IOMMU
-domain (one receive thread at ~96 % of a core).
+Without patch 5 the limit was per-frame page clearing and DMA mapping (one
+receive thread at ~96 % of a core). `udev/61-thunderbolt-net-threaded.rules`
+turns threaded NAPI on for every thunderbolt-net interface; with patch 5 it
+still takes a single stream from 13-14 to 17 Gb/s (measured with background
+load) and from 9.5 to 21 Gb/s together with GRO off.
 
 Patches 1 and 2 were boot-tested together on 7.2.11: the TX ring options
 read back with the E2E bit set (0x90000000; 0x80000000 with an unpatched

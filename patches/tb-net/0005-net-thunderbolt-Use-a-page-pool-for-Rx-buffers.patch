@@ -1,0 +1,220 @@
+From b74e4aa29245f725e37367bfc73839f4f7dfddbd Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 18:24:06 +0000
+Subject: [PATCH 5/5] net: thunderbolt: Use a page pool for Rx buffers
+
+Every received ThunderboltIP frame (at most 4 KiB) takes a freshly
+allocated page that is DMA mapped before it goes on the Rx ring and
+unmapped when it comes back. With init_on_alloc=1, the default on several
+distributions, the allocation also clears the whole page, which is 16 KiB
+per frame on a 16K-page kernel. Behind an IOMMU in strict mode every map
+and unmap also invalidates the IOTLB.
+
+On an Apple M1 Max host (the NHI DART domain is strict) the Rx NAPI
+thread spent about 44 % of its time in clear_page() and about 10 % in
+the IOMMU map, unmap and IOVA paths, and saturated a CPU at 7-8 Gb/s.
+
+Allocate the Rx pages from a page pool that keeps them DMA mapped and
+recycle them through the skbs. The pool syncs only the part of the page
+the hardware writes. Pages no longer need to be cleared or mapped per
+frame. The Tx side already copies into long-lived mapped pages.
+
+Same-host loopback between two USB4 ports of a Mac Studio (M1 Max,
+20 Gb/s x2, Tx E2E as in the previous patch, 256-entry rings, threaded
+NAPI, GRO off, iperf3 20 s per run, Gb/s):
+
+                       MTU 65522               MTU 1500
+                       before   after          before   after
+  single stream         7.2     21.2            7.7     20.9
+  reverse               7.3     21.0            7.5     21.1
+  bidirectional         6.9+7.0 15.2+14.6       7.2+7.2 15.4+14.8
+
+At a fixed 5 Gb/s single stream the Rx NAPI thread drops from 59 % to
+17 % of a CPU, and the whole loopback (both ends, iperf3 included) from
+0.86 to 0.40 CPUs. No frames were dropped and 1 GiB transfers checked
+with sha256 matched. With the driver defaults (softirq NAPI, GRO on) a
+single stream goes from 5.1 to 9.5 Gb/s.
+
+With the pool the Rx ring size matters much less: 512 or 1024 entries
+give the same single-stream rate as 256 and about 10 % more in the
+bidirectional run (16.8+16.5 Gb/s), for twice or four times the Rx
+memory (4 MiB per interface at 256 entries on 16K pages). Before this
+patch 1024 entries gave 8.1 instead of 7.2 Gb/s. The ring size is left
+alone.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ drivers/net/thunderbolt/Kconfig |  1 +
+ drivers/net/thunderbolt/main.c  | 62 +++++++++++++++++++++++++--------
+ 2 files changed, 49 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/net/thunderbolt/Kconfig b/drivers/net/thunderbolt/Kconfig
+index e127848c8..a2e574bec 100644
+--- a/drivers/net/thunderbolt/Kconfig
++++ b/drivers/net/thunderbolt/Kconfig
+@@ -2,6 +2,7 @@
+ config USB4_NET
+ 	tristate "Networking over USB4 and Thunderbolt cables"
+ 	depends on USB4 && INET
++	select PAGE_POOL
+ 	help
+ 	  Select this if you want to create network between two computers
+ 	  over a USB4 and Thunderbolt cables. The driver supports Apple
+diff --git a/drivers/net/thunderbolt/main.c b/drivers/net/thunderbolt/main.c
+index 406977d0e..a05bb1a91 100644
+--- a/drivers/net/thunderbolt/main.c
++++ b/drivers/net/thunderbolt/main.c
+@@ -23,6 +23,7 @@
+ #include <linux/workqueue.h>
+ 
+ #include <net/ip6_checksum.h>
++#include <net/page_pool/helpers.h>
+ 
+ #include "trace.h"
+ 
+@@ -145,6 +146,7 @@ struct tbnet_ring {
+ 	unsigned int cons;
+ 	unsigned int prod;
+ 	struct tb_ring *ring;
++	struct page_pool *page_pool;
+ };
+ 
+ /**
+@@ -354,6 +356,14 @@ static void tbnet_free_buffers(struct tbnet_ring *ring)
+ 
+ 		trace_tbnet_free_frame(i, tf->page, tf->frame.buffer_phy, dir);
+ 
++		if (!ring->ring->is_tx) {
++			/* Rx pages stay mapped by the page pool */
++			page_pool_put_full_page(ring->page_pool, tf->page,
++						false);
++			tf->page = NULL;
++			continue;
++		}
++
+ 		if (tf->frame.buffer_phy)
+ 			dma_unmap_page(dma_dev, tf->frame.buffer_phy, size,
+ 				       dir);
+@@ -509,7 +519,6 @@ static int tbnet_alloc_rx_buffers(struct tbnet *net, unsigned int nbuffers)
+ 	int ret;
+ 
+ 	while (nbuffers--) {
+-		struct device *dma_dev = tb_ring_dma_device(ring->ring);
+ 		unsigned int index = ring->prod & (TBNET_RING_SIZE - 1);
+ 		struct tbnet_frame *tf = &ring->frames[index];
+ 		dma_addr_t dma_addr;
+@@ -519,21 +528,17 @@ static int tbnet_alloc_rx_buffers(struct tbnet *net, unsigned int nbuffers)
+ 
+ 		/* Allocate page (order > 0) so that it can hold maximum
+ 		 * ThunderboltIP frame (4kB) and the additional room for
+-		 * SKB shared info required by build_skb().
++		 * SKB shared info required by build_skb(). The page pool
++		 * keeps recycled pages DMA mapped, which avoids an IOMMU
++		 * map and unmap (and TLB invalidation) per frame.
+ 		 */
+-		tf->page = dev_alloc_pages(TBNET_RX_PAGE_ORDER);
++		tf->page = page_pool_dev_alloc_pages(ring->page_pool);
+ 		if (!tf->page) {
+ 			ret = -ENOMEM;
+ 			goto err_free;
+ 		}
+ 
+-		dma_addr = dma_map_page(dma_dev, tf->page, 0,
+-					TBNET_RX_PAGE_SIZE, DMA_FROM_DEVICE);
+-		if (dma_mapping_error(dma_dev, dma_addr)) {
+-			ret = -ENOMEM;
+-			goto err_free;
+-		}
+-
++		dma_addr = page_pool_get_dma_addr(tf->page);
+ 		tf->frame.buffer_phy = dma_addr;
+ 		tf->dev = net->dev;
+ 
+@@ -854,8 +859,8 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
+ 		if (!frame)
+ 			break;
+ 
+-		dma_unmap_page(dma_dev, frame->buffer_phy,
+-			       TBNET_RX_PAGE_SIZE, DMA_FROM_DEVICE);
++		dma_sync_single_for_cpu(dma_dev, frame->buffer_phy,
++					TBNET_FRAME_SIZE, DMA_FROM_DEVICE);
+ 
+ 		tf = container_of(frame, typeof(*tf), frame);
+ 
+@@ -868,7 +873,7 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
+ 		if (!tbnet_check_frame(net, tf, hdr)) {
+ 			trace_tbnet_invalid_rx_ip_frame(hdr->frame_size,
+ 				hdr->frame_id, hdr->frame_index, hdr->frame_count);
+-			__free_pages(page, TBNET_RX_PAGE_ORDER);
++			page_pool_recycle_direct(net->rx_ring.page_pool, page);
+ 			dev_kfree_skb_any(net->skb);
+ 			net->skb = NULL;
+ 			continue;
+@@ -883,10 +888,12 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
+ 			skb = build_skb(page_address(page),
+ 					TBNET_RX_PAGE_SIZE);
+ 			if (!skb) {
+-				__free_pages(page, TBNET_RX_PAGE_ORDER);
++				page_pool_recycle_direct(net->rx_ring.page_pool,
++							 page);
+ 				net->stats.rx_errors++;
+ 				break;
+ 			}
++			skb_mark_for_recycle(skb);
+ 
+ 			skb_reserve(skb, hdr_size);
+ 			skb_put(skb, frame_size);
+@@ -941,8 +948,17 @@ static void tbnet_start_poll(void *data)
+ static int tbnet_open(struct net_device *dev)
+ {
+ 	struct tbnet *net = netdev_priv(dev);
++	struct page_pool_params pp_params = {
++		.order = TBNET_RX_PAGE_ORDER,
++		.flags = PP_FLAG_DMA_MAP | PP_FLAG_DMA_SYNC_DEV,
++		.pool_size = TBNET_RING_SIZE,
++		.nid = NUMA_NO_NODE,
++		.dma_dir = DMA_FROM_DEVICE,
++		.max_len = TBNET_FRAME_SIZE,
++	};
+ 	struct tb_xdomain *xd = net->xd;
+ 	u16 sof_mask, eof_mask;
++	int ret;
+ 	struct tb_ring *ring;
+ 	unsigned int flags;
+ 	bool full_e2e;
+@@ -992,6 +1008,22 @@ static int tbnet_open(struct net_device *dev)
+ 	}
+ 	net->rx_ring.ring = ring;
+ 
++	pp_params.dev = tb_ring_dma_device(ring);
++	pp_params.napi = &net->napi;
++	pp_params.netdev = dev;
++	net->rx_ring.page_pool = page_pool_create(&pp_params);
++	if (IS_ERR(net->rx_ring.page_pool)) {
++		netdev_err(dev, "failed to create Rx page pool\n");
++		ret = PTR_ERR(net->rx_ring.page_pool);
++		net->rx_ring.page_pool = NULL;
++		tb_ring_free(net->rx_ring.ring);
++		net->rx_ring.ring = NULL;
++		tb_xdomain_release_out_hopid(xd, net->local_transmit_path);
++		tb_ring_free(net->tx_ring.ring);
++		net->tx_ring.ring = NULL;
++		return ret;
++	}
++
+ 	tb_ring_throttling(net->tx_ring.ring, TBNET_THROTTLING);
+ 	tb_ring_throttling(net->rx_ring.ring, TBNET_THROTTLING);
+ 
+@@ -1012,6 +1044,8 @@ static int tbnet_stop(struct net_device *dev)
+ 
+ 	tb_ring_free(net->rx_ring.ring);
+ 	net->rx_ring.ring = NULL;
++	page_pool_destroy(net->rx_ring.page_pool);
++	net->rx_ring.page_pool = NULL;
+ 
+ 	tb_xdomain_release_out_hopid(net->xd, net->local_transmit_path);
+ 	tb_ring_free(net->tx_ring.ring);
+-- 
+2.56.0
+

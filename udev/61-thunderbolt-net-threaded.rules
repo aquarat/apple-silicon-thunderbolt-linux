@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# thunderbolt-net on Apple silicon: run the receive NAPI poll in its own
+# kernel thread (threaded NAPI) instead of in softirq context.
+#
+# The Apple interrupt controller (AIC2) does not support interrupt affinity
+# and delivers most NHI ring interrupts to the efficiency cores, where softirq
+# NAPI then runs. A NAPI thread can be scheduled on a performance core. On an
+# M1 Max loopback with the Rx page pool patch (patches/tb-net) and GRO off,
+# measured with background load on every core, a single stream goes from
+# 13-14 to 17 Gb/s.
+#
+# GRO is left alone here. On this path GRO reorders segments and causes
+# spurious TCP retransmits (and at a 64 KiB MTU it has nothing to merge);
+# to turn it off as well, add
+#   RUN+="/usr/sbin/ethtool -K $name gro off"
+# DRIVERS== matches the XDomain service device the netdev sits on.
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="thunderbolt-net", ATTR{threaded}="1"

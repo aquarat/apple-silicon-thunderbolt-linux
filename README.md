@@ -41,7 +41,7 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
 | `patches/tb-net/` | separate 6-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
-| `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI for thunderbolt-net interfaces (see Thunderbolt networking) |
+| `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI and GRO off for thunderbolt-net interfaces (see Thunderbolt networking) |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
 | `tools/` | test tools: `tb-soak.sh` (filesystem soak with software replugs), `plot-soak.py` (graphs), `tb-port-cycle` / `tipd-4cc` (software replug through the port's USB-C PD controller; the address table is for the Mac Studio) |
 | `docs/results/` | graphs from the soak runs quoted below |
@@ -247,9 +247,11 @@ causes spurious retransmits; at a 64 KiB MTU it has nothing to merge anyway.
 The RX ring size is a compile-time constant (`TBNET_RING_SIZE`, 256 upstream).
 Without patch 5 the limit was per-frame page clearing and DMA mapping (one
 receive thread at ~96 % of a core). `udev/61-thunderbolt-net-threaded.rules`
-turns threaded NAPI on for every thunderbolt-net interface; with patch 5 it
-still takes a single stream from 13-14 to 17 Gb/s (measured with background
-load) and from 9.5 to 21 Gb/s together with GRO off.
+turns threaded NAPI on and GRO off for every thunderbolt-net interface
+(GRO off needs `ethtool`); with patch 5 threaded NAPI still takes a single
+stream from 13-14 to 17 Gb/s (measured with background load) and from 9.5 to
+21 Gb/s together with GRO off. Mac-to-Mac at MTU 1500, GRO on cost about
+20 % (16.9 vs 21.4 Gb/s) with hundreds of retransmits per run.
 
 Patches 1 and 2 were boot-tested together on 7.2.11: the TX ring options
 read back with the E2E bit set (0x90000000; 0x80000000 with an unpatched

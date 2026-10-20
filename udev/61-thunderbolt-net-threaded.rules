@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # thunderbolt-net on Apple silicon: run the receive NAPI poll in its own
-# kernel thread (threaded NAPI) instead of in softirq context.
+# kernel thread (threaded NAPI) instead of in softirq context, and turn GRO
+# off.
 #
 # The Apple interrupt controller (AIC2) does not support interrupt affinity
 # and delivers most NHI ring interrupts to the efficiency cores, where softirq
@@ -10,9 +11,10 @@
 # measured with background load on every core, a single stream goes from
 # 13-14 to 17 Gb/s.
 #
-# GRO is left alone here. On this path GRO reorders segments and causes
-# spurious TCP retransmits (and at a 64 KiB MTU it has nothing to merge);
-# to turn it off as well, add
-#   RUN+="/usr/sbin/ethtool -K $name gro off"
+# GRO reorders segments on this path and causes spurious TCP retransmits; at
+# a 64 KiB MTU it has nothing to merge either. Mac-to-Mac at MTU 1500 it cost
+# about 20 % (21.4 vs 16.9 Gb/s single stream, hundreds of retransmits per
+# 15 s run against none). Delete the second rule to keep GRO on.
 # DRIVERS== matches the XDomain service device the netdev sits on.
 ACTION=="add", SUBSYSTEM=="net", DRIVERS=="thunderbolt-net", ATTR{threaded}="1"
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="thunderbolt-net", RUN+="/usr/sbin/ethtool -K $name gro off"

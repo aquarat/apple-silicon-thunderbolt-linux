@@ -1,0 +1,279 @@
+From af6369cbd1ad7e752d3bcb306525c6e1bd210301 Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 07:57:30 +0000
+Subject: [PATCH 3/4] arm64: dts: apple: t600x: Add tunnelled PCIe controllers
+
+Add the tunnelled PCIe root complexes of USB4 ports 0-3 of die 0 and their
+DARTs, disabled. Boards enable the ports they wire up.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/apple/t6001.dtsi        |   1 +
+ arch/arm64/boot/dts/apple/t6002.dtsi        |   1 +
+ arch/arm64/boot/dts/apple/t600x-apciec.dtsi | 229 ++++++++++++++++++++
+ 3 files changed, 231 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/apple/t600x-apciec.dtsi
+
+diff --git a/arch/arm64/boot/dts/apple/t6001.dtsi b/arch/arm64/boot/dts/apple/t6001.dtsi
+index 46ce49682..9fd6c5bbc 100644
+--- a/arch/arm64/boot/dts/apple/t6001.dtsi
++++ b/arch/arm64/boot/dts/apple/t6001.dtsi
+@@ -45,6 +45,7 @@ soc {
+ 
+ #include "t600x-die0.dtsi"
+ #include "t600x-dieX.dtsi"
++#include "t600x-apciec.dtsi"
+ #include "t600x-nvme.dtsi"
+ #include "t600x-gpio-pins.dtsi"
+ #include "t600x-pmgr.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t6002.dtsi b/arch/arm64/boot/dts/apple/t6002.dtsi
+index d34a03b37..778d180a9 100644
+--- a/arch/arm64/boot/dts/apple/t6002.dtsi
++++ b/arch/arm64/boot/dts/apple/t6002.dtsi
+@@ -266,6 +266,7 @@ die1: soc@2200000000 {
+ 
+ #include "t600x-die0.dtsi"
+ #include "t600x-dieX.dtsi"
++#include "t600x-apciec.dtsi"
+ #include "t600x-pmgr.dtsi"
+ #include "t600x-gpio-pins.dtsi"
+ 
+diff --git a/arch/arm64/boot/dts/apple/t600x-apciec.dtsi b/arch/arm64/boot/dts/apple/t600x-apciec.dtsi
+new file mode 100644
+index 000000000..66d378dbe
+--- /dev/null
++++ b/arch/arm64/boot/dts/apple/t600x-apciec.dtsi
+@@ -0,0 +1,229 @@
++// SPDX-License-Identifier: GPL-2.0+ OR MIT
++/*
++ * Tunnelled PCIe root complexes (APCIEC) behind USB4 ports 0-3 of a T600x
++ * die, with their DARTs. Included from the die's soc node next to
++ * t600x-dieX.dtsi (DIE_NODE()/DIE_NO as there). Boards enable the ports they
++ * wire up, together with the matching DART, and add the usb4_N_pcie aliases
++ * that the bootloader uses to fill in the tunables.
++ *
++ * The DART only responds while the port application clock runs; the
++ * controller provides that clock (clocks = <&apciecN>).
++ */
++
++&SOC_NODE {
++	DIE_NODE(apciec0_dart): iommu@721008000 {
++		compatible = "apple,t8110-dart";
++		reg = <0x7 0x21008000 0x0 0x4000>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1198 IRQ_TYPE_LEVEL_HIGH>;
++		#iommu-cells = <1>;
++		power-domains = <&DIE_NODE(ps_atc0_pcie)>;
++		clocks = <&DIE_NODE(apciec0)>;
++		status = "disabled";
++	};
++
++	DIE_NODE(apciec0): pcie@730000000 {
++		compatible = "apple,t6000-apciec";
++		device_type = "pci";
++		reg = <0x7 0x30000000 0x0 0x10000000>,
++			<0x7 0x20000000 0x0 0x4000>,
++			<0x7 0x21000000 0x0 0x8000>,
++			<0x7 0x20004000 0x0 0x4000>,
++			<0x7 0x20200000 0x0 0x4000>;
++		reg-names = "config", "rc", "port", "fabric", "debug";
++
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1197 IRQ_TYPE_LEVEL_HIGH>;
++
++		msi-controller;
++		msi-parent = <&DIE_NODE(apciec0)>;
++		msi-ranges = <&aic AIC_IRQ DIE_NO 1614 IRQ_TYPE_EDGE_RISING 32>;
++
++		/* all functions behind the port share one stream */
++		iommu-map = <0 &DIE_NODE(apciec0_dart) 1 1>;
++		iommu-map-mask = <0>;
++
++		power-domains = <&DIE_NODE(ps_atc0_pcie)>;
++		#clock-cells = <0>;
++		dma-coherent;
++
++		bus-range = <0 255>;
++		#address-cells = <3>;
++		#size-cells = <2>;
++		ranges = <0x43000000 0x8 0x0 0x8 0x0 0x2 0x0>,
++			<0x02000000 0x0 0x00100000 0xa 0x00100000 0x0 0x3ff00000>,
++			<0x42000000 0x0 0x40000000 0xa 0x40000000 0x0 0x40000000>;
++		status = "disabled";
++
++		/* must stay the first child: the bootloader fills its tunables */
++		DIE_NODE(apciec0_port): pci@0,0 {
++			device_type = "pci";
++			reg = <0x0 0x0 0x0 0x0 0x0>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			ranges;
++		};
++	};
++
++	DIE_NODE(apciec1_dart): iommu@b21008000 {
++		compatible = "apple,t8110-dart";
++		reg = <0xb 0x21008000 0x0 0x4000>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1215 IRQ_TYPE_LEVEL_HIGH>;
++		#iommu-cells = <1>;
++		power-domains = <&DIE_NODE(ps_atc1_pcie)>;
++		clocks = <&DIE_NODE(apciec1)>;
++		status = "disabled";
++	};
++
++	DIE_NODE(apciec1): pcie@b30000000 {
++		compatible = "apple,t6000-apciec";
++		device_type = "pci";
++		reg = <0xb 0x30000000 0x0 0x10000000>,
++			<0xb 0x20000000 0x0 0x4000>,
++			<0xb 0x21000000 0x0 0x8000>,
++			<0xb 0x20004000 0x0 0x4000>,
++			<0xb 0x20200000 0x0 0x4000>;
++		reg-names = "config", "rc", "port", "fabric", "debug";
++
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1214 IRQ_TYPE_LEVEL_HIGH>;
++
++		msi-controller;
++		msi-parent = <&DIE_NODE(apciec1)>;
++		msi-ranges = <&aic AIC_IRQ DIE_NO 1646 IRQ_TYPE_EDGE_RISING 32>;
++
++		/* all functions behind the port share one stream */
++		iommu-map = <0 &DIE_NODE(apciec1_dart) 1 1>;
++		iommu-map-mask = <0>;
++
++		power-domains = <&DIE_NODE(ps_atc1_pcie)>;
++		#clock-cells = <0>;
++		dma-coherent;
++
++		bus-range = <0 255>;
++		#address-cells = <3>;
++		#size-cells = <2>;
++		ranges = <0x43000000 0xc 0x0 0xc 0x0 0x2 0x0>,
++			<0x02000000 0x0 0x00100000 0xe 0x00100000 0x0 0x3ff00000>,
++			<0x42000000 0x0 0x40000000 0xe 0x40000000 0x0 0x40000000>;
++		status = "disabled";
++
++		/* must stay the first child: the bootloader fills its tunables */
++		DIE_NODE(apciec1_port): pci@0,0 {
++			device_type = "pci";
++			reg = <0x0 0x0 0x0 0x0 0x0>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			ranges;
++		};
++	};
++
++	DIE_NODE(apciec2_dart): iommu@f21008000 {
++		compatible = "apple,t8110-dart";
++		reg = <0xf 0x21008000 0x0 0x4000>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1232 IRQ_TYPE_LEVEL_HIGH>;
++		#iommu-cells = <1>;
++		power-domains = <&DIE_NODE(ps_atc2_pcie)>;
++		clocks = <&DIE_NODE(apciec2)>;
++		status = "disabled";
++	};
++
++	DIE_NODE(apciec2): pcie@f30000000 {
++		compatible = "apple,t6000-apciec";
++		device_type = "pci";
++		reg = <0xf 0x30000000 0x0 0x10000000>,
++			<0xf 0x20000000 0x0 0x4000>,
++			<0xf 0x21000000 0x0 0x8000>,
++			<0xf 0x20004000 0x0 0x4000>,
++			<0xf 0x20200000 0x0 0x4000>;
++		reg-names = "config", "rc", "port", "fabric", "debug";
++
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1231 IRQ_TYPE_LEVEL_HIGH>;
++
++		msi-controller;
++		msi-parent = <&DIE_NODE(apciec2)>;
++		msi-ranges = <&aic AIC_IRQ DIE_NO 1678 IRQ_TYPE_EDGE_RISING 32>;
++
++		/* all functions behind the port share one stream */
++		iommu-map = <0 &DIE_NODE(apciec2_dart) 1 1>;
++		iommu-map-mask = <0>;
++
++		power-domains = <&DIE_NODE(ps_atc2_pcie)>;
++		#clock-cells = <0>;
++		dma-coherent;
++
++		bus-range = <0 255>;
++		#address-cells = <3>;
++		#size-cells = <2>;
++		ranges = <0x43000000 0x10 0x0 0x10 0x0 0x2 0x0>,
++			<0x02000000 0x0 0x00100000 0x12 0x00100000 0x0 0x3ff00000>,
++			<0x42000000 0x0 0x40000000 0x12 0x40000000 0x0 0x40000000>;
++		status = "disabled";
++
++		/* must stay the first child: the bootloader fills its tunables */
++		DIE_NODE(apciec2_port): pci@0,0 {
++			device_type = "pci";
++			reg = <0x0 0x0 0x0 0x0 0x0>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			ranges;
++		};
++	};
++
++	DIE_NODE(apciec3_dart): iommu@1321008000 {
++		compatible = "apple,t8110-dart";
++		reg = <0x13 0x21008000 0x0 0x4000>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1249 IRQ_TYPE_LEVEL_HIGH>;
++		#iommu-cells = <1>;
++		power-domains = <&DIE_NODE(ps_atc3_pcie)>;
++		clocks = <&DIE_NODE(apciec3)>;
++		status = "disabled";
++	};
++
++	DIE_NODE(apciec3): pcie@1330000000 {
++		compatible = "apple,t6000-apciec";
++		device_type = "pci";
++		reg = <0x13 0x30000000 0x0 0x10000000>,
++			<0x13 0x20000000 0x0 0x4000>,
++			<0x13 0x21000000 0x0 0x8000>,
++			<0x13 0x20004000 0x0 0x4000>,
++			<0x13 0x20200000 0x0 0x4000>;
++		reg-names = "config", "rc", "port", "fabric", "debug";
++
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ DIE_NO 1248 IRQ_TYPE_LEVEL_HIGH>;
++
++		msi-controller;
++		msi-parent = <&DIE_NODE(apciec3)>;
++		msi-ranges = <&aic AIC_IRQ DIE_NO 1710 IRQ_TYPE_EDGE_RISING 32>;
++
++		/* all functions behind the port share one stream */
++		iommu-map = <0 &DIE_NODE(apciec3_dart) 1 1>;
++		iommu-map-mask = <0>;
++
++		power-domains = <&DIE_NODE(ps_atc3_pcie)>;
++		#clock-cells = <0>;
++		dma-coherent;
++
++		bus-range = <0 255>;
++		#address-cells = <3>;
++		#size-cells = <2>;
++		ranges = <0x43000000 0x14 0x0 0x14 0x0 0x2 0x0>,
++			<0x02000000 0x0 0x00100000 0x16 0x00100000 0x0 0x3ff00000>,
++			<0x42000000 0x0 0x40000000 0x16 0x40000000 0x0 0x40000000>;
++		status = "disabled";
++
++		/* must stay the first child: the bootloader fills its tunables */
++		DIE_NODE(apciec3_port): pci@0,0 {
++			device_type = "pci";
++			reg = <0x0 0x0 0x0 0x0 0x0>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			ranges;
++		};
++	};
++};
+-- 
+2.56.0
+

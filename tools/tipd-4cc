@@ -1,0 +1,94 @@
+#!/usr/bin/python3 -I
+# Issue one TI/Apple PD-controller (tipd, CD321x) 4CC command over raw i2c.
+#   sudo tipd-4cc PORT CMD [DATA_HEX]     e.g.  sudo tipd-4cc 3 HRST
+#   sudo tipd-4cc PORT --read REG LEN     e.g.  sudo tipd-4cc 3 --read 0x03 4
+# Uses I2C_RDWR, so it works while tps6598x is bound; each register access is
+# one atomic transfer, but a command the kernel driver issues at the same
+# moment could interleave (it only issues them on probe/role swaps).
+# Test tool. The address table is the Mac Studio (j375c) rear ports 0-3; other
+# machines differ. Logs every command to /dev/kmsg.
+import ctypes, fcntl, os, sys, time
+
+import glob
+ADDR = [0x38, 0x3f, 0x3b, 0x3c]          # tipd per rear port 0-3
+REG_MODE, REG_CMD1, REG_DATA1 = 0x03, 0x08, 0x09
+I2C_RDWR, I2C_M_RD = 0x0707, 0x0001
+
+class Msg(ctypes.Structure):
+    _fields_ = [("addr", ctypes.c_uint16), ("flags", ctypes.c_uint16),
+                ("len", ctypes.c_uint16), ("buf", ctypes.POINTER(ctypes.c_uint8))]
+
+class RdWr(ctypes.Structure):
+    _fields_ = [("msgs", ctypes.POINTER(Msg)), ("nmsgs", ctypes.c_uint32)]
+
+def xfer(fd, addr, *msgs):
+    arr = (Msg * len(msgs))()
+    bufs = []
+    for i, (flags, data) in enumerate(msgs):
+        b = (ctypes.c_uint8 * len(data))(*data)
+        bufs.append(b)
+        arr[i] = Msg(addr, flags, len(data), ctypes.cast(b, ctypes.POINTER(ctypes.c_uint8)))
+    fcntl.ioctl(fd, I2C_RDWR, RdWr(arr, len(msgs)))
+    return [bytes(b) for b in bufs]
+
+def read(fd, addr, reg, n):
+    # tipd i2c protocol: reply starts with a byte count
+    _, r = xfer(fd, addr, (0, [reg]), (I2C_M_RD, [0] * (n + 1)))
+    return r[1:1 + min(n, r[0])]
+
+def write(fd, addr, reg, data):
+    xfer(fd, addr, (0, [reg, len(data)] + list(data)))
+
+def kmsg(s):
+    try:
+        with open("/dev/kmsg", "w") as k:
+            k.write("tipd-4cc: %s\n" % s)
+    except OSError:
+        pass
+
+def main():
+    if len(sys.argv) < 3:
+        sys.exit(__doc__ if __doc__ else "usage: tipd-4cc PORT CMD [DATA_HEX]")
+    addr = ADDR[int(sys.argv[1])]
+    # i2c bus numbering varies per boot; find the bus carrying this tipd
+    devs = glob.glob("/sys/bus/i2c/devices/*-%04x" % addr)
+    if len(devs) != 1:
+        sys.exit("cannot locate tipd 0x%02x: %r" % (addr, devs))
+    bus = int(os.path.basename(devs[0]).split("-")[0])
+    fd = os.open("/dev/i2c-%d" % bus, os.O_RDWR)
+    mode = read(fd, addr, REG_MODE, 4)
+    print("port %s addr 0x%02x mode %r" % (sys.argv[1], addr, mode))
+    if sys.argv[2] == "--read":
+        print(read(fd, addr, int(sys.argv[3], 0), int(sys.argv[4])).hex())
+        return
+    if mode != b"APP ":
+        sys.exit("controller not in APP mode; refusing")
+    cmd = sys.argv[2].encode()
+    assert len(cmd) == 4
+    busy = read(fd, addr, REG_CMD1, 4)
+    if busy not in (b"\0\0\0\0", b"!CMD"):
+        sys.exit("CMD1 busy: %r" % busy)
+    data = bytes.fromhex(sys.argv[3]) if len(sys.argv) > 3 else b""
+    kmsg("port %s cmd %s data %s" % (sys.argv[1], cmd.decode(), data.hex()))
+    if data:
+        write(fd, addr, REG_DATA1, data)
+    write(fd, addr, REG_CMD1, cmd)
+    t = time.time()
+    while time.time() - t < 5:
+        try:
+            v = read(fd, addr, REG_CMD1, 4)
+        except OSError:          # controller may NAK while resetting
+            time.sleep(0.05)
+            continue
+        if v == b"!CMD":
+            kmsg("port %s cmd %s rejected (!CMD)" % (sys.argv[1], cmd.decode()))
+            sys.exit("rejected: !CMD (unsupported command)")
+        if v == b"\0\0\0\0":
+            res = read(fd, addr, REG_DATA1, 8)
+            kmsg("port %s cmd %s done, data1 %s" % (sys.argv[1], cmd.decode(), res.hex()))
+            print("done in %.2fs, data1=%s" % (time.time() - t, res.hex()))
+            return
+        time.sleep(0.02)
+    sys.exit("timeout; CMD1=%r" % v)
+
+main()

@@ -1,0 +1,11 @@
+#!/bin/bash
+# Software replug of one rear TB port: put its CD321x into system power state S5
+# (VBUS/link off) for a few seconds, then back to S0. Equivalent to unplug/replug
+# without a tipd rebind (no atcphy WARN). Verified 2026-10-19 on port 3.
+#   sudo tb-port-cycle PORT [OFF_SECONDS]
+set -euo pipefail
+port=${1:?usage: $0 PORT [OFF_SECONDS]}
+off=${2:-4}
+tipd-4cc "$port" SSPS 05
+sleep "$off"
+tipd-4cc "$port" SSPS 00

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# NVMe drives behind an Apple tunnelled PCIe (APCIEC, Thunderbolt/USB4)
+# root port: turn off NVMe APST (autonomous power state transitions).
+#
+# With APST enabled, a drive entering a non-operational power state while
+# idle has been seen to drop the USB4 link (ASM2464PD enclosure, about 15 s
+# after the drive went idle). Writing 0 to the controller's PM QoS latency
+# tolerance makes nvme_core disable APST for that controller only.
+#
+# Matched on the namespace's block device rather than on the controller: the
+# controller's power/pm_qos_latency_tolerance_us file appears only after the
+# controller's own "add" uevent, so an ATTR{} write there races and loses.
+# DRIVERS== matches any ancestor, so this works whatever the APCIEC node is
+# called. With native NVMe multipath the per-path node (nvmeXcYnZ) sits
+# under the controller and matches; the virtual head node does not.
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="nvme*n*", ENV{DEVTYPE}=="disk", \
+  DRIVERS=="pcie-apple-apciec", \
+  RUN+="/bin/sh -c 'echo 0 > /sys%p/../power/pm_qos_latency_tolerance_us'"

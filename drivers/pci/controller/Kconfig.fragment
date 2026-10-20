@@ -1,0 +1,16 @@
+# Insert into drivers/pci/controller/Kconfig after "config PCIE_APPLE".
+config PCIE_APPLE_APCIEC
+	tristate "Apple tunnelled PCIe (USB4/Thunderbolt) controller"
+	depends on ARCH_APPLE || COMPILE_TEST
+	depends on OF && PCI_MSI && COMMON_CLK
+	depends on PCIE_APPLE
+	select APPLE_TUNABLE
+	select IRQ_MSI_LIB
+	help
+	  Say Y or M here to support the PCIe root complexes that Apple T600x
+	  (M1 Pro/Max/Ultra) SoCs provide behind each USB4/Thunderbolt port.
+	  Together with the USB4 driver, which builds the PCIe tunnels, this
+	  makes PCIe devices in Thunderbolt/USB4 enclosures (for example NVMe
+	  drives) usable.
+
+	  If unsure, say N.

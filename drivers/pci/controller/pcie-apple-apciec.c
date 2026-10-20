@@ -1,0 +1,1177 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * PCIe host driver for the tunnelled PCIe root complexes ("APCIEC") behind
+ * the USB4/Thunderbolt ports of Apple T600x SoCs.
+ *
+ * Every USB4 port has its own PCIe root complex with a single root port. The
+ * root port's link never leaves the SoC: it runs through a PCIe tunnel that
+ * the USB4 connection manager builds between the port's PCIe down adapter and
+ * the PCIe up adapter of the attached router. The port block is the one also
+ * found in the internal PCIe controller (see pcie-apple.c), with the same port
+ * register layout, plus a tunnel reset handshake (TUNCTRL/TUNSTAT).
+ *
+ * Link management differs from a physical port:
+ *
+ *  - The link can only train while a PCIe tunnel exists. TUNSTAT bit 0 reads
+ *    set while there is none (or while the tunnel is being reset) and clears
+ *    by itself shortly after the connection manager has activated the PCIe
+ *    path. The driver polls it; nothing below the root port is scanned before
+ *    the link is up, because a scan with the link down fixes the root port's
+ *    subordinate bus number and strands any switch behind it.
+ *
+ *  - Unplugging, or the connection manager tearing the tunnel down, raises
+ *    the TUNNEL_ERR and later LINK_DOWN port interrupts and clears LTSSMCTL.
+ *    PORT_LINKSTS bit 0 stays set after such a loss, so link state is tracked
+ *    through the LINK_UP/LINK_DOWN interrupt status bits instead. On a loss
+ *    the driver removes every device below the root port and waits for a new
+ *    tunnel, then retrains and rescans. The first training attempt on a
+ *    freshly built tunnel usually ends in LINK_DOWN; an immediate retrain
+ *    then succeeds.
+ *
+ *  - The port's DART only responds while the port application clock runs.
+ *    The driver exposes that clock to the DART (#clock-cells = <0>), so the
+ *    DART cannot probe before the port is enabled, and scans nothing before
+ *    the DART is bound. The DART consuming the clock also means the driver
+ *    cannot be unbound at runtime: the driver core would unbind the DART
+ *    first, whose device links unbind the PCI functions parents first, and a
+ *    bridge losing its driver stops forwarding DMA for the functions below it.
+ *    Like pcie-apple, the driver therefore suppresses manual unbinding (and
+ *    the clock reference keeps the module loaded).
+ *
+ *  - Link power management across the tunnel is not usable: ASPM L1 on any
+ *    link of the tunnelled hierarchy drops the USB4 link within seconds.
+ *    ASPM is therefore disabled on every link below the root port.
+ *
+ * The register tunables (offset/mask/value triples) are per-device data that
+ * the bootloader copies into the device tree; this driver only applies them.
+ *
+ * The MSI domain and the RID-to-SID handling are adapted from pcie-apple.c:
+ *   Copyright (C) 2021 Alyssa Rosenzweig <alyssa@rosenzweig.io>
+ *   Copyright (C) 2021 Google LLC
+ *   Copyright (C) 2021 Corellium LLC
+ *   Copyright (C) 2021 Mark Kettenis <kettenis@openbsd.org>
+ *   Authors: Alyssa Rosenzweig, Marc Zyngier
+ *
+ * Copyright (C) 2026 aquarat
+ */
+
+#include <linux/bitfield.h>
+#include <linux/bitmap.h>
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/debugfs.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
+#include <linux/iopoll.h>
+#include <linux/irqchip/irq-msi-lib.h>
+#include <linux/irqdomain.h>
+#include <linux/jiffies.h>
+#include <linux/ktime.h>
+#include <linux/log2.h>
+#include <linux/module.h>
+#include <linux/msi.h>
+#include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/pci.h>
+#include <linux/pci-ecam.h>
+#include <linux/platform_device.h>
+#include <linux/seq_file.h>
+#include <linux/sizes.h>
+#include <linux/soc/apple/tunable.h>
+#include <linux/workqueue.h>
+
+/* Port control block ("port" register range) */
+#define PORT_LTSSMCTL			0x0080
+#define   PORT_LTSSMCTL_START		BIT(0)
+#define PORT_INTSTAT			0x0100
+#define   PORT_INT_TUNNEL_ERR		BIT(31)
+#define   PORT_INT_LINK_DOWN		BIT(14)
+#define   PORT_INT_LINK_UP		BIT(12)
+#define   PORT_INT_LINK_EVENTS		(PORT_INT_TUNNEL_ERR | \
+					 PORT_INT_LINK_DOWN | \
+					 PORT_INT_LINK_UP)
+#define   PORT_INT_LOSS			(PORT_INT_TUNNEL_ERR | \
+					 PORT_INT_LINK_DOWN)
+#define PORT_INTMSK			0x0104
+#define PORT_MSICFG			0x0124
+#define   PORT_MSICFG_EN		BIT(0)
+#define   PORT_MSICFG_L2MSINUM		GENMASK(7, 4)
+#define PORT_MSIBASE			0x0128
+#define PORT_MSIADDR			0x0168
+#define PORT_LINKSTS			0x0208
+#define PORT_LINKCMDSTS			0x0210
+#define PORT_APPCLK			0x0800
+#define   PORT_APPCLK_EN		BIT(0)
+#define   PORT_APPCLK_CGDIS		BIT(8)
+#define PORT_STATUS			0x0804
+#define   PORT_STATUS_READY		BIT(0)
+#define PORT_REFCLK			0x0810
+#define PORT_PERST			0x0814
+#define   PORT_PERST_OFF		BIT(0)
+#define PORT_RID2SID(i)			(0x0828 + 4 * (i))
+#define   PORT_RID2SID_VALID		BIT(31)
+#define   PORT_RID2SID_SID		GENMASK(23, 16)
+#define   PORT_RID2SID_RID		GENMASK(15, 0)
+#define PORT_TUNCTRL			0x0988
+#define   PORT_TUNCTRL_PERST_ON		BIT(0)
+#define PORT_TUNSTAT			0x098c
+#define   PORT_TUNSTAT_PERST_ON		BIT(0)
+
+#define APCIEC_RID2SID_ENTRIES		64
+#define APCIEC_MAX_MSI			32
+
+/*
+ * The doorbell is the same one the internal controller uses (and that the
+ * DART driver keeps out of the IOVA space for PCI devices).
+ */
+#define APCIEC_DOORBELL_ADDR		CONFIG_PCIE_APPLE_MSI_DOORBELL_ADDR
+
+/* Tunnel reset completion after TUNCTRL is cleared. */
+#define APCIEC_TUNNEL_TIMEOUT_US	(100 * USEC_PER_MSEC)
+/* Link training, including retrains after LINK_DOWN. */
+#define APCIEC_LINK_TIMEOUT_MS		1000
+/* After a loss, how long to wait for TUNSTAT to report the tunnel gone. */
+#define APCIEC_LOSS_SETTLE		(2 * HZ)
+/*
+ * TUNSTAT poll intervals. Some tunnelled devices give up on PCIe if their
+ * link has not trained within about ten seconds of the tunnel being built,
+ * so poll quickly for a while after probe or a loss, then back off.
+ */
+#define APCIEC_POLL_FAST		msecs_to_jiffies(200)
+#define APCIEC_POLL_SLOW		msecs_to_jiffies(1000)
+#define APCIEC_POLL_FAST_PERIOD		(60 * HZ)
+#define APCIEC_RETRY_DELAY		msecs_to_jiffies(500)
+#define APCIEC_DART_POLL		msecs_to_jiffies(20)
+
+/**
+ * struct apciec - one tunnelled PCIe root complex
+ * @dev: platform device
+ * @ecam: configuration space ("config")
+ * @port: root port control registers ("port")
+ * @fabric: fabric registers ("fabric")
+ * @debug: debug registers ("debug")
+ * @ecam_res: configuration space resource
+ * @tunable_debug: bootloader tunables for @debug
+ * @tunable_fabric: bootloader tunables for @fabric
+ * @tunable_port: bootloader tunables for @port
+ * @tunable_rc: bootloader tunables for the root port's config space
+ * @bridge: PCI host bridge, registered on the first link-up
+ * @busn: bus number range
+ * @msi_fwspec: parent interrupt of MSI vector 0
+ * @msi_nvec: number of MSI vectors
+ * @msi_domain: MSI parent domain
+ * @msi_lock: protects @msi_map
+ * @msi_map: allocated MSI vectors
+ * @sid_lock: protects @sid_map and the RID2SID table
+ * @sid_map: used RID2SID entries
+ * @appclk_hw: port application clock, provided to the DART
+ * @appclk: this driver's own reference to @appclk_hw
+ * @appclk_on: @appclk is prepared and enabled
+ * @dart: the port's DART
+ * @dart_attach_time: last time the DART was offered a probe (jiffies)
+ * @debugfs: debugfs directory
+ * @irq: port management interrupt, once requested
+ * @down_work: tears down the hierarchy after a tunnel or link loss
+ * @link_work: waits for a tunnel and (re)starts the link
+ * @lock: protects the link state below and serialises (re)starts
+ * @released: TUNCTRL has been cleared (tunnel reset released)
+ * @host_registered: @bridge has been registered
+ * @link_up: the link is up and devices below the root port are reachable
+ * @tunnel_gone: TUNSTAT has reported the tunnel gone since the last loss
+ * @stopping: the driver is being unbound
+ * @down_time: jiffies of the last loss, or of probe
+ * @failures: consecutive failed link starts
+ */
+struct apciec {
+	struct device		*dev;
+	void __iomem		*ecam;
+	void __iomem		*port;
+	void __iomem		*fabric;
+	void __iomem		*debug;
+	struct resource		*ecam_res;
+
+	struct apple_tunable	*tunable_debug;
+	struct apple_tunable	*tunable_fabric;
+	struct apple_tunable	*tunable_port;
+	struct apple_tunable	*tunable_rc;
+
+	struct pci_host_bridge	*bridge;
+	struct resource		*busn;
+
+	struct irq_fwspec	msi_fwspec;
+	unsigned int		msi_nvec;
+	struct irq_domain	*msi_domain;
+	struct mutex		msi_lock;	/* protects msi_map */
+	DECLARE_BITMAP(msi_map, APCIEC_MAX_MSI);
+
+	struct mutex		sid_lock;	/* protects sid_map, RID2SID */
+	DECLARE_BITMAP(sid_map, APCIEC_RID2SID_ENTRIES);
+
+	struct clk_hw		appclk_hw;
+	struct clk		*appclk;
+	bool			appclk_on;
+	struct platform_device	*dart;
+	unsigned long		dart_attach_time;
+	struct dentry		*debugfs;
+
+	int			irq;
+	struct work_struct	down_work;
+	struct delayed_work	link_work;
+
+	struct mutex		lock;		/* protects the link state */
+	bool			released;
+	bool			host_registered;
+	bool			link_up;
+	bool			tunnel_gone;
+	bool			stopping;
+	unsigned long		down_time;
+	unsigned int		failures;
+};
+
+static void apciec_rmw(struct apciec *pcie, u32 reg, u32 clr, u32 set)
+{
+	writel((readl(pcie->port + reg) & ~clr) | set, pcie->port + reg);
+}
+
+static void apciec_set(struct apciec *pcie, u32 reg, u32 set)
+{
+	apciec_rmw(pcie, reg, 0, set);
+}
+
+static void apciec_clear(struct apciec *pcie, u32 reg, u32 clr)
+{
+	apciec_rmw(pcie, reg, clr, 0);
+}
+
+/*
+ * Return the port block to a known state. Apart from the first write, these
+ * are the values the registers read after the power domain is switched on;
+ * 0x100, 0x148 and 0x210 are write-one-to-clear status registers. Writing
+ * 0x110 to 0x08c has a self-clearing effect (the register reads 0 again
+ * afterwards). The port may have been used before (bootloader, or an earlier
+ * instance of this driver without a power cycle).
+ */
+static void apciec_reset_port(struct apciec *pcie)
+{
+	static const struct {
+		u16 reg;
+		u32 val;
+	} seq[] = {
+		{ 0x008c, 0x110 },
+		{ PORT_INTSTAT, U32_MAX },
+		{ 0x0148, U32_MAX },
+		{ PORT_LINKCMDSTS, U32_MAX },
+		{ PORT_LTSSMCTL, 0 },
+		{ 0x0084, 0 },
+		{ PORT_INTMSK, U32_MAX },
+		{ PORT_MSICFG, 0 },
+		{ PORT_MSIBASE, 0 },
+		{ PORT_MSIADDR, 0 },
+		{ 0x013c, 0x10 },
+		{ PORT_APPCLK, 0x100100 },
+		{ 0x0808, 0x100045 },
+		{ PORT_REFCLK, 0x100 },
+		{ PORT_PERST, 0 },
+		{ PORT_RID2SID(0), 0 },
+		{ 0x0130, 0x208 },
+		{ 0x0140, 0x10 },
+		{ 0x0144, 0x253770 },
+		{ 0x021c, 0 },
+		{ 0x081c, 0 },
+		{ 0x0824, 0 },
+	};
+	unsigned int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		writel(seq[i].val, pcie->port + seq[i].reg);
+		if (seq[i].reg == PORT_RID2SID(0))
+			for (j = 1; j < APCIEC_RID2SID_ENTRIES; j++)
+				writel(0, pcie->port + PORT_RID2SID(j));
+	}
+}
+
+/*
+ * Port application clock. It feeds the root port and the port's DART, and can
+ * only be started once the port has been reset, tuned and taken out of local
+ * PERST, so the controller starts it itself during probe and only exposes it
+ * to the DART (which then cannot probe before the clock runs).
+ */
+static int apciec_appclk_prepare(struct clk_hw *hw)
+{
+	struct apciec *pcie = container_of(hw, struct apciec, appclk_hw);
+	u32 stat;
+	int ret;
+
+	apciec_set(pcie, PORT_APPCLK, PORT_APPCLK_EN);
+	ret = readl_poll_timeout(pcie->port + PORT_STATUS, stat,
+				 stat & PORT_STATUS_READY, 100, 250000);
+	if (ret) {
+		dev_err(pcie->dev, "port not ready after clock enable\n");
+		return ret;
+	}
+	apciec_clear(pcie, PORT_APPCLK, PORT_APPCLK_CGDIS);
+	return 0;
+}
+
+static void apciec_appclk_unprepare(struct clk_hw *hw)
+{
+	struct apciec *pcie = container_of(hw, struct apciec, appclk_hw);
+
+	/* back to the power-on value */
+	apciec_rmw(pcie, PORT_APPCLK, PORT_APPCLK_EN, PORT_APPCLK_CGDIS);
+}
+
+static const struct clk_ops apciec_appclk_ops = {
+	.prepare	= apciec_appclk_prepare,
+	.unprepare	= apciec_appclk_unprepare,
+};
+
+static int apciec_register_appclk(struct apciec *pcie)
+{
+	struct clk_init_data init = {
+		.ops = &apciec_appclk_ops,
+	};
+	int ret;
+
+	init.name = devm_kasprintf(pcie->dev, GFP_KERNEL, "%s-appclk",
+				   dev_name(pcie->dev));
+	if (!init.name)
+		return -ENOMEM;
+	pcie->appclk_hw.init = &init;
+
+	ret = devm_clk_hw_register(pcie->dev, &pcie->appclk_hw);
+	if (ret)
+		return ret;
+
+	pcie->appclk = devm_clk_hw_get_clk(pcie->dev, &pcie->appclk_hw, "port");
+	if (IS_ERR(pcie->appclk))
+		return PTR_ERR(pcie->appclk);
+	return 0;
+}
+
+/*
+ * Bring the port up to the point where it waits for a tunnel: reset, debug,
+ * fabric and port tunables, local PERST deasserted, application clock on.
+ */
+static int apciec_enable_port(struct apciec *pcie)
+{
+	int ret;
+
+	apciec_reset_port(pcie);
+	apple_tunable_apply(pcie->debug, pcie->tunable_debug);
+	apple_tunable_apply(pcie->fabric, pcie->tunable_fabric);
+	apple_tunable_apply(pcie->port, pcie->tunable_port);
+	apciec_set(pcie, PORT_PERST, PORT_PERST_OFF);
+
+	ret = clk_prepare_enable(pcie->appclk);
+	if (ret)
+		return ret;
+	pcie->appclk_on = true;
+	return 0;
+}
+
+static void apciec_quiesce_port(struct apciec *pcie)
+{
+	writel(U32_MAX, pcie->port + PORT_INTMSK);
+	writel(0, pcie->port + PORT_MSICFG);
+	writel(0, pcie->port + PORT_LTSSMCTL);
+	if (pcie->released)
+		writel(PORT_TUNCTRL_PERST_ON, pcie->port + PORT_TUNCTRL);
+	apciec_clear(pcie, PORT_PERST, PORT_PERST_OFF);
+}
+
+/* MSI: a 32-entry window of AIC interrupts, data = port-local vector */
+
+static void apciec_msi_compose_msg(struct irq_data *data, struct msi_msg *msg)
+{
+	msg->address_hi = upper_32_bits(APCIEC_DOORBELL_ADDR);
+	msg->address_lo = lower_32_bits(APCIEC_DOORBELL_ADDR);
+	msg->data = data->hwirq;
+}
+
+static struct irq_chip apciec_msi_bottom_chip = {
+	.name			= "APCIEC-MSI",
+	.irq_mask		= irq_chip_mask_parent,
+	.irq_unmask		= irq_chip_unmask_parent,
+	.irq_eoi		= irq_chip_eoi_parent,
+	.irq_set_affinity	= irq_chip_set_affinity_parent,
+	.irq_set_type		= irq_chip_set_type_parent,
+	.irq_compose_msi_msg	= apciec_msi_compose_msg,
+};
+
+static int apciec_msi_domain_alloc(struct irq_domain *domain, unsigned int virq,
+				   unsigned int nr_irqs, void *args)
+{
+	struct apciec *pcie = domain->host_data;
+	struct irq_fwspec fwspec = pcie->msi_fwspec;
+	unsigned int i;
+	int ret, hwirq;
+
+	mutex_lock(&pcie->msi_lock);
+	hwirq = bitmap_find_free_region(pcie->msi_map, pcie->msi_nvec,
+					order_base_2(nr_irqs));
+	mutex_unlock(&pcie->msi_lock);
+	if (hwirq < 0)
+		return -ENOSPC;
+
+	fwspec.param[fwspec.param_count - 2] += hwirq;
+	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, &fwspec);
+	if (ret) {
+		mutex_lock(&pcie->msi_lock);
+		bitmap_release_region(pcie->msi_map, hwirq, order_base_2(nr_irqs));
+		mutex_unlock(&pcie->msi_lock);
+		return ret;
+	}
+
+	for (i = 0; i < nr_irqs; i++)
+		irq_domain_set_hwirq_and_chip(domain, virq + i, hwirq + i,
+					      &apciec_msi_bottom_chip, pcie);
+	return 0;
+}
+
+static void apciec_msi_domain_free(struct irq_domain *domain, unsigned int virq,
+				   unsigned int nr_irqs)
+{
+	struct irq_data *d = irq_domain_get_irq_data(domain, virq);
+	struct apciec *pcie = domain->host_data;
+	irq_hw_number_t hwirq = d->hwirq;
+
+	irq_domain_free_irqs_parent(domain, virq, nr_irqs);
+
+	mutex_lock(&pcie->msi_lock);
+	bitmap_release_region(pcie->msi_map, hwirq, order_base_2(nr_irqs));
+	mutex_unlock(&pcie->msi_lock);
+}
+
+static const struct irq_domain_ops apciec_msi_domain_ops = {
+	.alloc	= apciec_msi_domain_alloc,
+	.free	= apciec_msi_domain_free,
+};
+
+static const struct msi_parent_ops apciec_msi_parent_ops = {
+	.supported_flags	= MSI_GENERIC_FLAGS_MASK | MSI_FLAG_PCI_MSIX,
+	.required_flags		= MSI_FLAG_USE_DEF_DOM_OPS |
+				  MSI_FLAG_USE_DEF_CHIP_OPS |
+				  MSI_FLAG_PCI_MSI_MASK_PARENT,
+	.chip_flags		= MSI_CHIP_FLAG_SET_EOI,
+	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
+	.init_dev_msi_info	= msi_lib_init_dev_msi_info,
+};
+
+static int apciec_parse_msi(struct apciec *pcie)
+{
+	struct device_node *np = pcie->dev->of_node;
+	struct of_phandle_args args = {};
+	int ret;
+
+	ret = of_parse_phandle_with_args(np, "msi-ranges", "#interrupt-cells",
+					 0, &args);
+	if (ret)
+		return dev_err_probe(pcie->dev, ret, "invalid msi-ranges\n");
+
+	ret = of_property_read_u32_index(np, "msi-ranges", args.args_count + 1,
+					 &pcie->msi_nvec);
+	of_phandle_args_to_fwspec(args.np, args.args, args.args_count,
+				  &pcie->msi_fwspec);
+	of_node_put(args.np);
+	if (ret)
+		return dev_err_probe(pcie->dev, ret, "invalid msi-ranges\n");
+
+	if (!is_power_of_2(pcie->msi_nvec) || pcie->msi_nvec > APCIEC_MAX_MSI ||
+	    pcie->msi_fwspec.param_count < 2)
+		return dev_err_probe(pcie->dev, -EINVAL,
+				     "unsupported msi-ranges\n");
+	return 0;
+}
+
+static int apciec_msi_init(struct apciec *pcie)
+{
+	struct irq_domain_info info = {
+		.fwnode		= dev_fwnode(pcie->dev),
+		.ops		= &apciec_msi_domain_ops,
+		.size		= pcie->msi_nvec,
+		.host_data	= pcie,
+	};
+
+	info.parent = irq_find_matching_fwspec(&pcie->msi_fwspec,
+					       DOMAIN_BUS_WIRED);
+	if (!info.parent)
+		return dev_err_probe(pcie->dev, -EPROBE_DEFER,
+				     "MSI parent domain not available\n");
+
+	pcie->msi_domain = msi_create_parent_irq_domain(&info,
+							&apciec_msi_parent_ops);
+	if (!pcie->msi_domain)
+		return -ENOMEM;
+
+	/* MSI data is the port-local vector number 0..nvec-1. */
+	BUILD_BUG_ON(upper_32_bits(APCIEC_DOORBELL_ADDR));
+	writel(FIELD_PREP(PORT_MSICFG_L2MSINUM, ilog2(pcie->msi_nvec)) |
+	       PORT_MSICFG_EN, pcie->port + PORT_MSICFG);
+	writel(0, pcie->port + PORT_MSIBASE);
+	writel(lower_32_bits(APCIEC_DOORBELL_ADDR), pcie->port + PORT_MSIADDR);
+	return 0;
+}
+
+/* Config space: one root port at devfn 0 of the first bus. */
+
+static void __iomem *apciec_map_bus(struct pci_bus *bus, unsigned int devfn,
+				    int where)
+{
+	struct apciec *pcie = bus->sysdata;
+	unsigned int busn = bus->number - pcie->busn->start;
+	resource_size_t off;
+
+	if (bus->number < pcie->busn->start || bus->number > pcie->busn->end)
+		return NULL;
+	if (!busn && devfn)
+		return NULL;
+	/* Below the root port only while the link is up (reads all-ones). */
+	if (busn && !READ_ONCE(pcie->link_up))
+		return NULL;
+
+	off = PCIE_ECAM_OFFSET(busn, devfn, where);
+	if (off >= resource_size(pcie->ecam_res))
+		return NULL;
+	return pcie->ecam + off;
+}
+
+static struct pci_ops apciec_pci_ops = {
+	.map_bus	= apciec_map_bus,
+	.read		= pci_generic_config_read,
+	.write		= pci_generic_config_write,
+};
+
+static int apciec_enable_device(struct pci_host_bridge *bridge,
+				struct pci_dev *pdev)
+{
+	struct apciec *pcie = bridge->sysdata;
+	struct of_phandle_args spec = {};
+	u32 rid = pci_dev_id(pdev);
+	int idx, ret;
+
+	if (pci_is_root_bus(pdev->bus))
+		return 0;
+
+	/* L0s/L1 on a tunnelled link drops the USB4 link. */
+	pci_disable_link_state(pdev, PCIE_LINK_STATE_ALL);
+
+	ret = of_map_iommu_id(pcie->dev->of_node, rid, &spec);
+	if (ret)
+		return ret;
+	of_node_put(spec.np);
+
+	mutex_lock(&pcie->sid_lock);
+	idx = bitmap_find_free_region(pcie->sid_map, APCIEC_RID2SID_ENTRIES, 0);
+	if (idx >= 0)
+		writel(PORT_RID2SID_VALID |
+		       FIELD_PREP(PORT_RID2SID_SID, spec.args[0]) |
+		       FIELD_PREP(PORT_RID2SID_RID, rid),
+		       pcie->port + PORT_RID2SID(idx));
+	mutex_unlock(&pcie->sid_lock);
+	if (idx < 0)
+		return -ENOSPC;
+
+	dev_dbg(&pdev->dev, "RID %#06x -> SID %u (entry %d)\n", rid,
+		spec.args[0], idx);
+	return 0;
+}
+
+static void apciec_disable_device(struct pci_host_bridge *bridge,
+				  struct pci_dev *pdev)
+{
+	struct apciec *pcie = bridge->sysdata;
+	u32 rid = pci_dev_id(pdev);
+	int idx;
+
+	mutex_lock(&pcie->sid_lock);
+	for_each_set_bit(idx, pcie->sid_map, APCIEC_RID2SID_ENTRIES) {
+		u32 val = readl(pcie->port + PORT_RID2SID(idx));
+
+		if ((val & PORT_RID2SID_VALID) &&
+		    FIELD_GET(PORT_RID2SID_RID, val) == rid) {
+			writel(0, pcie->port + PORT_RID2SID(idx));
+			bitmap_release_region(pcie->sid_map, idx, 0);
+			break;
+		}
+	}
+	mutex_unlock(&pcie->sid_lock);
+}
+
+static int apciec_host_init(struct apciec *pcie)
+{
+	struct pci_host_bridge *bridge;
+	struct resource_entry *entry;
+	u32 id, class;
+
+	id = readl(pcie->ecam + PCI_VENDOR_ID);
+	class = readl(pcie->ecam + PCI_CLASS_REVISION) >> 16;
+	if (PCI_POSSIBLE_ERROR(id) || !id || class != PCI_CLASS_BRIDGE_PCI)
+		return dev_err_probe(pcie->dev, -ENODEV,
+				     "no root port in config space (%#010x)\n",
+				     id);
+
+	/* Root complex tunables go to the root port's config space. */
+	apple_tunable_apply(pcie->ecam, pcie->tunable_rc);
+
+	bridge = devm_pci_alloc_host_bridge(pcie->dev, 0);
+	if (!bridge)
+		return -ENOMEM;
+
+	entry = resource_list_first_type(&bridge->windows, IORESOURCE_BUS);
+	if (!entry)
+		return dev_err_probe(pcie->dev, -EINVAL, "no bus range\n");
+	pcie->busn = entry->res;
+	if (resource_size(pcie->busn) << 20 > resource_size(pcie->ecam_res))
+		return dev_err_probe(pcie->dev, -EINVAL,
+				     "bus range %pR exceeds config space\n",
+				     pcie->busn);
+	if (!resource_list_first_type(&bridge->windows, IORESOURCE_MEM))
+		return dev_err_probe(pcie->dev, -EINVAL, "no memory ranges\n");
+
+	bridge->sysdata = pcie;
+	bridge->ops = &apciec_pci_ops;
+	bridge->busnr = pcie->busn->start;
+	bridge->enable_device = apciec_enable_device;
+	bridge->disable_device = apciec_disable_device;
+	/* No INTx: MSI/MSI-X only. */
+	bridge->map_irq = NULL;
+	bridge->msi_domain = true;
+	/* Tunnel loss is handled by the port interrupt; no PCIe services. */
+	bridge->native_aer = 0;
+	bridge->native_pcie_hotplug = 0;
+	bridge->native_shpc_hotplug = 0;
+	bridge->native_pme = 0;
+	bridge->native_ltr = 0;
+	bridge->native_dpc = 0;
+	dev_set_msi_domain(&bridge->dev, pcie->msi_domain);
+	pcie->bridge = bridge;
+	return 0;
+}
+
+/* Tunnel handshake and link training */
+
+static int apciec_release_tunnel(struct apciec *pcie)
+{
+	u32 stat;
+	int ret;
+
+	writel(0, pcie->port + PORT_TUNCTRL);
+	pcie->released = true;
+	ret = readl_poll_timeout(pcie->port + PORT_TUNSTAT, stat,
+				 !(stat & PORT_TUNSTAT_PERST_ON), 1000,
+				 APCIEC_TUNNEL_TIMEOUT_US);
+	if (ret)
+		dev_dbg(pcie->dev, "tunnel reset did not complete\n");
+	return ret;
+}
+
+static int apciec_train_link(struct apciec *pcie)
+{
+	unsigned int retrains = 0;
+	ktime_t deadline;
+	u32 stat;
+
+	/* Wait for a fresh LINK_UP event; PORT_LINKSTS is sticky. */
+	writel(PORT_INT_LINK_EVENTS, pcie->port + PORT_INTSTAT);
+	apciec_set(pcie, PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+
+	deadline = ktime_add_ms(ktime_get(), APCIEC_LINK_TIMEOUT_MS);
+	do {
+		stat = readl(pcie->port + PORT_INTSTAT);
+		if (stat & PORT_INT_LINK_UP) {
+			dev_dbg(pcie->dev, "link up after %u retrain(s)\n",
+				retrains);
+			return 0;
+		}
+		if (stat & PORT_INT_LINK_DOWN) {
+			writel(PORT_INT_LINK_DOWN, pcie->port + PORT_INTSTAT);
+			apciec_clear(pcie, PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+			usleep_range(1000, 2000);
+			apciec_set(pcie, PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+			retrains++;
+		}
+		usleep_range(1000, 2000);
+	} while (ktime_before(ktime_get(), deadline));
+
+	apciec_clear(pcie, PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+	return -ETIMEDOUT;
+}
+
+/* Called with pcie->lock held, tunnel present (TUNSTAT clear). */
+static int apciec_start(struct apciec *pcie)
+{
+	int ret;
+
+	ret = apciec_release_tunnel(pcie);
+	if (ret)
+		return ret;
+
+	ret = apciec_train_link(pcie);
+	if (ret)
+		return ret;
+
+	writel(PORT_INT_LINK_EVENTS, pcie->port + PORT_INTSTAT);
+	WRITE_ONCE(pcie->link_up, true);
+	apciec_clear(pcie, PORT_INTMSK, PORT_INT_LOSS);
+	dev_info(pcie->dev, "link up\n");
+
+	if (pcie->host_registered) {
+		pci_lock_rescan_remove();
+		pci_rescan_bus(pcie->bridge->bus);
+		pci_unlock_rescan_remove();
+		return 0;
+	}
+
+	ret = pci_host_probe(pcie->bridge);
+	if (ret)
+		dev_err(pcie->dev, "PCI host registration failed: %d\n", ret);
+	else
+		pcie->host_registered = true;
+	return 0;
+}
+
+static void apciec_queue_link_work(struct apciec *pcie, unsigned long delay)
+{
+	if (!READ_ONCE(pcie->stopping))
+		queue_delayed_work(system_freezable_wq, &pcie->link_work, delay);
+}
+
+/*
+ * The DART must be bound before anything below the root port is scanned:
+ * PCI functions probed without it would end up without translation.
+ */
+static bool apciec_dart_ready(struct apciec *pcie)
+{
+	struct device *dart = &pcie->dart->dev;
+
+	if (device_is_bound(dart))
+		return true;
+	/* Not on the deferred list, e.g. after this driver was rebound. */
+	if (time_after(jiffies, pcie->dart_attach_time + HZ)) {
+		pcie->dart_attach_time = jiffies;
+		if (device_attach(dart) > 0)
+			return true;
+	}
+	if (time_after(jiffies, pcie->down_time + 5 * HZ))
+		dev_warn_once(pcie->dev, "waiting for DART %s\n", dev_name(dart));
+	return false;
+}
+
+static void apciec_link_work(struct work_struct *work)
+{
+	struct apciec *pcie = container_of(to_delayed_work(work), struct apciec,
+					   link_work);
+	unsigned long delay;
+	int ret;
+
+	if (READ_ONCE(pcie->stopping))
+		return;
+	if (!apciec_dart_ready(pcie)) {
+		apciec_queue_link_work(pcie, APCIEC_DART_POLL);
+		return;
+	}
+
+	mutex_lock(&pcie->lock);
+	if (pcie->link_up)
+		goto out_unlock;
+
+	if (!pcie->released) {
+		writel(0, pcie->port + PORT_TUNCTRL);
+		pcie->released = true;
+	}
+
+	delay = time_before(jiffies, pcie->down_time + APCIEC_POLL_FAST_PERIOD) ?
+		APCIEC_POLL_FAST : APCIEC_POLL_SLOW;
+
+	/* TUNSTAT sets once a lost tunnel is gone and clears with a new one. */
+	if (readl(pcie->port + PORT_TUNSTAT) & PORT_TUNSTAT_PERST_ON) {
+		pcie->tunnel_gone = true;
+		goto out_requeue;
+	}
+	/* A link drop that keeps the tunnel never sets TUNSTAT. */
+	if (!pcie->tunnel_gone &&
+	    time_before(jiffies, pcie->down_time + APCIEC_LOSS_SETTLE)) {
+		delay = APCIEC_POLL_FAST;
+		goto out_requeue;
+	}
+
+	ret = apciec_start(pcie);
+	if (!ret) {
+		pcie->failures = 0;
+		goto out_unlock;
+	}
+	if (!pcie->failures++)
+		dev_warn(pcie->dev, "link start failed (%d), retrying\n", ret);
+	else
+		dev_dbg(pcie->dev, "link start failed (%d), attempt %u\n", ret,
+			pcie->failures);
+	delay = APCIEC_RETRY_DELAY;
+
+out_requeue:
+	mutex_unlock(&pcie->lock);
+	apciec_queue_link_work(pcie, delay);
+	return;
+out_unlock:
+	mutex_unlock(&pcie->lock);
+}
+
+static void apciec_down_work(struct work_struct *work)
+{
+	struct apciec *pcie = container_of(work, struct apciec, down_work);
+	struct pci_dev *root, *dev, *tmp;
+
+	mutex_lock(&pcie->lock);
+	if (!pcie->link_up) {
+		mutex_unlock(&pcie->lock);
+		return;
+	}
+	WRITE_ONCE(pcie->link_up, false);
+	pcie->tunnel_gone = false;
+	pcie->down_time = jiffies;
+
+	/* The restart polls these itself and unmasks them on link-up. */
+	apciec_set(pcie, PORT_INTMSK, PORT_INT_LOSS);
+	apciec_clear(pcie, PORT_LTSSMCTL, PORT_LTSSMCTL_START);
+	dev_info(pcie->dev, "link lost, removing devices\n");
+
+	pci_lock_rescan_remove();
+	root = pcie->host_registered ?
+	       pci_get_slot(pcie->bridge->bus, PCI_DEVFN(0, 0)) : NULL;
+	if (root && root->subordinate)
+		list_for_each_entry_safe_reverse(dev, tmp,
+						 &root->subordinate->devices,
+						 bus_list)
+			pci_stop_and_remove_bus_device(dev);
+	pci_dev_put(root);
+	pci_unlock_rescan_remove();
+	mutex_unlock(&pcie->lock);
+
+	apciec_queue_link_work(pcie, APCIEC_POLL_FAST);
+}
+
+static irqreturn_t apciec_port_irq(int irq, void *data)
+{
+	struct apciec *pcie = data;
+	u32 stat;
+
+	stat = readl(pcie->port + PORT_INTSTAT) &
+	       ~readl(pcie->port + PORT_INTMSK);
+	if (!stat)
+		return IRQ_NONE;
+	writel(stat, pcie->port + PORT_INTSTAT);
+	dev_dbg(pcie->dev, "port interrupt %#010x\n", stat);
+
+	if (stat & PORT_INT_LOSS)
+		queue_work(system_freezable_wq, &pcie->down_work);
+	return IRQ_HANDLED;
+}
+
+/* debugfs: read-only register snapshot */
+
+static int apciec_regs_show(struct seq_file *s, void *unused)
+{
+	static const struct {
+		const char *name;
+		u32 reg;
+	} regs[] = {
+		{ "LTSSMCTL", PORT_LTSSMCTL },
+		{ "INTSTAT", PORT_INTSTAT },
+		{ "INTMSK", PORT_INTMSK },
+		{ "MSICFG", PORT_MSICFG },
+		{ "MSIADDR", PORT_MSIADDR },
+		{ "LINKSTS", PORT_LINKSTS },
+		{ "LINKCMDSTS", PORT_LINKCMDSTS },
+		{ "APPCLK", PORT_APPCLK },
+		{ "STATUS", PORT_STATUS },
+		{ "REFCLK", PORT_REFCLK },
+		{ "PERST", PORT_PERST },
+		{ "TUNCTRL", PORT_TUNCTRL },
+		{ "TUNSTAT", PORT_TUNSTAT },
+	};
+	struct apciec *pcie = dev_get_drvdata(s->private);
+	unsigned int i;
+	u32 val;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++)
+		seq_printf(s, "%-10s %#06x %#010x\n", regs[i].name, regs[i].reg,
+			   readl(pcie->port + regs[i].reg));
+	for (i = 0; i < APCIEC_RID2SID_ENTRIES; i++) {
+		val = readl(pcie->port + PORT_RID2SID(i));
+		if (val)
+			seq_printf(s, "RID2SID%-3u %#06x %#010x\n", i,
+				   PORT_RID2SID(i), val);
+	}
+	seq_printf(s, "link_up    %d\n", READ_ONCE(pcie->link_up));
+	return 0;
+}
+
+/* Probe and teardown */
+
+static int apciec_get_tunable(struct apciec *pcie, struct device_node *np,
+			      const char *name, struct resource *res,
+			      struct apple_tunable **tunable)
+{
+	*tunable = devm_apple_tunable_parse(pcie->dev, np, name, res);
+	if (IS_ERR(*tunable))
+		return dev_err_probe(pcie->dev, PTR_ERR(*tunable),
+				     "%pOF: missing or invalid %s (provided by the bootloader, m1n1 1.6.1 or later)\n",
+				     np, name);
+	return 0;
+}
+
+static int apciec_get_tunables(struct apciec *pcie, struct resource *debug,
+			       struct resource *fabric, struct resource *port)
+{
+	struct device_node *np = pcie->dev->of_node;
+	struct resource rc = DEFINE_RES_MEM(0, SZ_4K);
+	struct device_node *child;
+	int ret;
+
+	ret = apciec_get_tunable(pcie, np, "apple,tunable-debug", debug,
+				 &pcie->tunable_debug);
+	if (ret)
+		return ret;
+	ret = apciec_get_tunable(pcie, np, "apple,tunable-fabric", fabric,
+				 &pcie->tunable_fabric);
+	if (ret)
+		return ret;
+	/* Applied to the root port's 4 KiB config space. */
+	ret = apciec_get_tunable(pcie, np, "apple,tunable-rc", &rc,
+				 &pcie->tunable_rc);
+	if (ret)
+		return ret;
+
+	/* The bootloader puts the port tunables into the root port node. */
+	for_each_child_of_node(np, child)
+		if (of_property_present(child, "apple,tunable"))
+			break;
+	if (!child)
+		return dev_err_probe(pcie->dev, -ENOENT,
+				     "no root port node with apple,tunable (provided by the bootloader, m1n1 1.6.1 or later)\n");
+	ret = apciec_get_tunable(pcie, child, "apple,tunable", port,
+				 &pcie->tunable_port);
+	of_node_put(child);
+	return ret;
+}
+
+static void apciec_put_dart(void *data)
+{
+	platform_device_put(data);
+}
+
+static int apciec_get_dart(struct apciec *pcie)
+{
+	struct device_node *np = pcie->dev->of_node;
+	struct device_node *dart_np, *clk_np;
+	int ret;
+
+	dart_np = of_parse_phandle(np, "iommu-map", 1);
+	if (!dart_np)
+		return dev_err_probe(pcie->dev, -EINVAL, "no iommu-map\n");
+
+	/* The DART must not probe before the application clock runs. */
+	clk_np = of_parse_phandle(dart_np, "clocks", 0);
+	of_node_put(clk_np);
+	if (clk_np != np) {
+		dev_err(pcie->dev, "%pOF must use this controller's clock\n",
+			dart_np);
+		of_node_put(dart_np);
+		return -EINVAL;
+	}
+
+	pcie->dart = of_find_device_by_node(dart_np);
+	pcie->dart_attach_time = jiffies;
+	of_node_put(dart_np);
+	if (!pcie->dart)
+		return dev_err_probe(pcie->dev, -EPROBE_DEFER,
+				     "DART device not created yet\n");
+
+	ret = devm_add_action_or_reset(pcie->dev, apciec_put_dart, pcie->dart);
+	if (ret)
+		pcie->dart = NULL;
+	return ret;
+}
+
+static void __iomem *apciec_map(struct platform_device *pdev, const char *name,
+				resource_size_t min, struct resource **resp)
+{
+	struct resource *res;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
+	if (!res || resource_size(res) < min) {
+		dev_err(&pdev->dev, "missing or short \"%s\" registers\n", name);
+		return IOMEM_ERR_PTR(-EINVAL);
+	}
+	if (resp)
+		*resp = res;
+	return devm_ioremap_resource(&pdev->dev, res);
+}
+
+static void apciec_teardown(struct apciec *pcie)
+{
+	WRITE_ONCE(pcie->stopping, true);
+	/* No register reads once the port may be off. */
+	debugfs_remove_recursive(pcie->debugfs);
+	pcie->debugfs = NULL;
+	if (pcie->irq > 0) {
+		writel(U32_MAX, pcie->port + PORT_INTMSK);
+		devm_free_irq(pcie->dev, pcie->irq, pcie);
+		pcie->irq = 0;
+	}
+	cancel_work_sync(&pcie->down_work);
+	cancel_delayed_work_sync(&pcie->link_work);
+
+	if (pcie->host_registered) {
+		pci_lock_rescan_remove();
+		pci_stop_root_bus(pcie->bridge->bus);
+		pci_remove_root_bus(pcie->bridge->bus);
+		pci_unlock_rescan_remove();
+		pcie->host_registered = false;
+	}
+
+	/*
+	 * Reached on probe failure, or on unload if the DART never bound (a
+	 * bound DART holds the clock and so the module). Never leave a DART
+	 * bound to a block whose clock is about to stop.
+	 */
+	if (pcie->dart && device_is_bound(&pcie->dart->dev))
+		device_release_driver(&pcie->dart->dev);
+
+	apciec_quiesce_port(pcie);
+	if (pcie->msi_domain) {
+		irq_domain_remove(pcie->msi_domain);
+		pcie->msi_domain = NULL;
+	}
+	if (pcie->appclk_on) {
+		clk_disable_unprepare(pcie->appclk);
+		pcie->appclk_on = false;
+	}
+}
+
+static int apciec_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct resource *debug, *fabric, *port;
+	struct apciec *pcie;
+	int irq, ret;
+
+	if (!device_property_read_bool(dev, "dma-coherent"))
+		return dev_err_probe(dev, -EINVAL,
+				     "dma-coherent is required\n");
+
+	pcie = devm_kzalloc(dev, sizeof(*pcie), GFP_KERNEL);
+	if (!pcie)
+		return -ENOMEM;
+	pcie->dev = dev;
+	platform_set_drvdata(pdev, pcie);
+
+	ret = devm_mutex_init(dev, &pcie->lock);
+	if (ret)
+		return ret;
+	ret = devm_mutex_init(dev, &pcie->msi_lock);
+	if (ret)
+		return ret;
+	ret = devm_mutex_init(dev, &pcie->sid_lock);
+	if (ret)
+		return ret;
+	INIT_WORK(&pcie->down_work, apciec_down_work);
+	INIT_DELAYED_WORK(&pcie->link_work, apciec_link_work);
+
+	pcie->port = apciec_map(pdev, "port", SZ_16K, &port);
+	if (IS_ERR(pcie->port))
+		return PTR_ERR(pcie->port);
+	pcie->fabric = apciec_map(pdev, "fabric", SZ_16K, &fabric);
+	if (IS_ERR(pcie->fabric))
+		return PTR_ERR(pcie->fabric);
+	pcie->debug = apciec_map(pdev, "debug", SZ_16K, &debug);
+	if (IS_ERR(pcie->debug))
+		return PTR_ERR(pcie->debug);
+	pcie->ecam = apciec_map(pdev, "config", SZ_1M, &pcie->ecam_res);
+	if (IS_ERR(pcie->ecam))
+		return PTR_ERR(pcie->ecam);
+
+	ret = apciec_get_tunables(pcie, debug, fabric, port);
+	if (ret)
+		return ret;
+	ret = apciec_parse_msi(pcie);
+	if (ret)
+		return ret;
+	ret = apciec_get_dart(pcie);
+	if (ret)
+		return ret;
+	ret = apciec_register_appclk(pcie);
+	if (ret)
+		return ret;
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	/* The power domain is on from here (attached by the platform bus). */
+	ret = apciec_enable_port(pcie);
+	if (ret)
+		goto err_teardown;
+
+	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get,
+					  &pcie->appclk_hw);
+	if (ret)
+		goto err_teardown;
+
+	ret = apciec_msi_init(pcie);
+	if (ret)
+		goto err_teardown;
+
+	ret = apciec_host_init(pcie);
+	if (ret)
+		goto err_teardown;
+
+	/* Link events only; unmasked once the link is up. */
+	ret = devm_request_threaded_irq(dev, irq, NULL, apciec_port_irq,
+					IRQF_ONESHOT, dev_name(dev), pcie);
+	if (ret)
+		goto err_teardown;
+	pcie->irq = irq;
+
+	pcie->debugfs = debugfs_create_dir(dev_name(dev), NULL);
+	debugfs_create_devm_seqfile(dev, "regs", pcie->debugfs,
+				    apciec_regs_show);
+
+	/* No tunnel seen yet: start as soon as TUNSTAT reports one. */
+	pcie->tunnel_gone = true;
+	pcie->down_time = jiffies;
+	apciec_queue_link_work(pcie, 0);
+	return 0;
+
+err_teardown:
+	apciec_teardown(pcie);
+	return ret;
+}
+
+static void apciec_remove(struct platform_device *pdev)
+{
+	apciec_teardown(platform_get_drvdata(pdev));
+}
+
+static const struct of_device_id apciec_of_match[] = {
+	{ .compatible = "apple,t6000-apciec" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, apciec_of_match);
+
+static struct platform_driver apciec_driver = {
+	.probe	= apciec_probe,
+	.remove	= apciec_remove,
+	.driver	= {
+		.name		= "pcie-apple-apciec",
+		.of_match_table	= apciec_of_match,
+		.suppress_bind_attrs = true,
+	},
+};
+module_platform_driver(apciec_driver);
+
+MODULE_DESCRIPTION("Apple T600x tunnelled PCIe (USB4/Thunderbolt) host driver");
+MODULE_LICENSE("GPL");

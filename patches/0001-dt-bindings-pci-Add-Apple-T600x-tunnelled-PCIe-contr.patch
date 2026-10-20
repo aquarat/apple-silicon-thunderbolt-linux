@@ -1,0 +1,250 @@
+From e8e4a5c5168169b633a8abec414be0465cabdb03 Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 07:57:29 +0000
+Subject: [PATCH 1/4] dt-bindings: pci: Add Apple T600x tunnelled PCIe
+ controller
+
+Each USB4/Thunderbolt port of the Apple T600x SoCs (M1 Pro/Max/Ultra) has
+its own PCIe root complex with a single root port whose link is carried by
+a PCIe tunnel over the USB4 link. Describe these controllers. The port's
+DART only responds while the port application clock runs, so the
+controller is a clock provider and the DART references that clock.
+
+The register tunables are filled in by the bootloader.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ .../bindings/pci/apple,t6000-apciec.yaml      | 207 ++++++++++++++++++
+ MAINTAINERS                                   |   1 +
+ 2 files changed, 208 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml
+
+diff --git a/Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml b/Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml
+new file mode 100644
+index 000000000..7e278b218
+--- /dev/null
++++ b/Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml
+@@ -0,0 +1,207 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/pci/apple,t6000-apciec.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Apple T600x tunnelled PCIe root complex (APCIEC)
++
++maintainers:
++  - aquarat <3090997+aquarat@users.noreply.github.com>
++
++description: |
++  Each USB4/Thunderbolt port of the Apple T600x SoCs (M1 Pro, M1 Max, M1
++  Ultra) has its own PCIe root complex with a single root port. The link of
++  that root port does not leave the SoC: it is carried by a PCIe tunnel that
++  the USB4 connection manager sets up between the port's PCIe down adapter
++  and the PCIe up adapter of the attached router.
++
++  The root port uses the same port register block as the internal PCIe
++  controller (apple,pcie), extended by a tunnel reset handshake. The port has
++  its own DART (apple,t8110-dart), which only responds while the port's
++  application clock is running. The controller therefore provides that clock
++  (#clock-cells = <0>) and the DART must reference it in its "clocks"
++  property.
++
++  The register tunables (apple,tunable-*) are per-device calibration data that
++  the bootloader (m1n1 1.6.1 or later) copies into the device tree. It finds
++  this node through the "usb4_N_pcie" alias, where N is the USB4 port number,
++  and puts the port tunables into the node's first child, the root port.
++
++properties:
++  compatible:
++    description:
++      Shared by T6000 (M1 Pro), T6001 (M1 Max) and T6002 (M1 Ultra).
++    const: apple,t6000-apciec
++
++  reg:
++    items:
++      - description: ECAM configuration space
++      - description: Root complex common registers
++      - description: Root port control registers
++      - description: Fabric registers
++      - description: Debug registers
++
++  reg-names:
++    items:
++      - const: config
++      - const: rc
++      - const: port
++      - const: fabric
++      - const: debug
++
++  interrupts:
++    description: Root port management interrupt (link and tunnel events).
++    maxItems: 1
++
++  msi-controller: true
++
++  msi-parent: true
++
++  msi-ranges:
++    description:
++      The 32 interrupt controller lines that the root port's MSIs are
++      delivered on, in vector order.
++    maxItems: 1
++
++  iommu-map: true
++
++  iommu-map-mask: true
++
++  power-domains:
++    maxItems: 1
++
++  dma-coherent: true
++
++  "#clock-cells":
++    const: 0
++    description:
++      The port application clock, consumed by the port's DART.
++
++  ranges:
++    minItems: 1
++    maxItems: 3
++
++  apple,tunable-debug:
++    $ref: "#/$defs/apple,tunable"
++    description: Tunables for the debug registers.
++
++  apple,tunable-fabric:
++    $ref: "#/$defs/apple,tunable"
++    description: Tunables for the fabric registers.
++
++  apple,tunable-rc:
++    $ref: "#/$defs/apple,tunable"
++    description:
++      Tunables for the configuration space of the root port (offsets within
++      its first 4 KiB).
++
++patternProperties:
++  "^pci@0(,0)?$":
++    $ref: /schemas/pci/pci-pci-bridge.yaml#
++    type: object
++    description: The root port.
++
++    properties:
++      reg:
++        maxItems: 1
++
++      apple,tunable:
++        $ref: "#/$defs/apple,tunable"
++        description: Tunables for the root port control registers.
++
++    unevaluatedProperties: false
++
++$defs:
++  apple,tunable:
++    $ref: /schemas/types.yaml#/definitions/uint32-matrix
++    items:
++      items:
++        - description: Register offset
++        - description: Mask of the bits to clear
++        - description: Bits to set after clearing
++    description:
++      List of (register offset, mask, value) tuples provided by the
++      bootloader. They differ between devices and are not part of the device
++      tree source.
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - interrupts
++  - msi-controller
++  - msi-parent
++  - msi-ranges
++  - iommu-map
++  - power-domains
++  - dma-coherent
++  - "#clock-cells"
++  - ranges
++  - bus-range
++
++allOf:
++  - $ref: /schemas/pci/pci-host-bridge.yaml#
++  - $ref: /schemas/interrupt-controller/msi-controller.yaml#
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/interrupt-controller/apple-aic.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    soc {
++      #address-cells = <2>;
++      #size-cells = <2>;
++
++      apciec0_dart: iommu@721008000 {
++        compatible = "apple,t8110-dart";
++        reg = <0x7 0x21008000 0x0 0x4000>;
++        interrupt-parent = <&aic>;
++        interrupts = <AIC_IRQ 0 1198 IRQ_TYPE_LEVEL_HIGH>;
++        #iommu-cells = <1>;
++        power-domains = <&ps_atc0_pcie>;
++        clocks = <&apciec0>;
++      };
++
++      apciec0: pcie@730000000 {
++        compatible = "apple,t6000-apciec";
++        device_type = "pci";
++        reg = <0x7 0x30000000 0x0 0x10000000>,
++              <0x7 0x20000000 0x0 0x4000>,
++              <0x7 0x21000000 0x0 0x8000>,
++              <0x7 0x20004000 0x0 0x4000>,
++              <0x7 0x20200000 0x0 0x4000>;
++        reg-names = "config", "rc", "port", "fabric", "debug";
++
++        interrupt-parent = <&aic>;
++        interrupts = <AIC_IRQ 0 1197 IRQ_TYPE_LEVEL_HIGH>;
++
++        msi-controller;
++        msi-parent = <&apciec0>;
++        msi-ranges = <&aic AIC_IRQ 0 1614 IRQ_TYPE_EDGE_RISING 32>;
++
++        iommu-map = <0 &apciec0_dart 1 1>;
++        iommu-map-mask = <0>;
++
++        power-domains = <&ps_atc0_pcie>;
++        #clock-cells = <0>;
++        dma-coherent;
++
++        bus-range = <0 255>;
++        #address-cells = <3>;
++        #size-cells = <2>;
++        ranges = <0x43000000 0x8 0x0 0x8 0x0 0x2 0x0>,
++                 <0x02000000 0x0 0x00100000 0xa 0x00100000 0x0 0x3ff00000>,
++                 <0x42000000 0x0 0x40000000 0xa 0x40000000 0x0 0x40000000>;
++
++        pci@0,0 {
++          device_type = "pci";
++          reg = <0x0 0x0 0x0 0x0 0x0>;
++          #address-cells = <3>;
++          #size-cells = <2>;
++          ranges;
++        };
++      };
++    };
+diff --git a/MAINTAINERS b/MAINTAINERS
+index fa4e0b27a..9d844d031 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -2610,6 +2610,7 @@ F:	Documentation/devicetree/bindings/nvme/apple,nvme-ans.yaml
+ F:	Documentation/devicetree/bindings/nvmem/apple,efuses.yaml
+ F:	Documentation/devicetree/bindings/nvmem/apple,spmi-nvmem.yaml
+ F:	Documentation/devicetree/bindings/pci/apple,pcie.yaml
++F:	Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml
+ F:	Documentation/devicetree/bindings/phy/apple,atcphy.yaml
+ F:	Documentation/devicetree/bindings/pinctrl/apple,pinctrl.yaml
+ F:	Documentation/devicetree/bindings/power/apple*
+-- 
+2.56.0
+

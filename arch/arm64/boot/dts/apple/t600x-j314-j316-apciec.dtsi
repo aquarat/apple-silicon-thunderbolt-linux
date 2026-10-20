@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /*
  * Board part for the 14"/16" MacBook Pro (j314s/j314c/j316s/j316c): USB4
- * ports 0-2. As a patch these lines go into t600x-j314-j316.dtsi.
+ * ports 0-2. Included from the T600x j314/j316 .dts files only:
+ * t600x-j314-j316.dtsi is shared with T602x boards, which have no APCIEC
+ * nodes.
  */
 
 / {

@@ -119,33 +119,28 @@ DARTs, disabled. Boards enable the ports they wire up.
 $trailer
 EOF
 
-# 4: boards
-board_bits() {	# FILE NPORTS ANCHOR_REGEX
-	local f=$1 n=$2 i aliases='' nodes=''
-	for ((i = 0; i < n; i++)); do
-		aliases+=$'\t\t'"usb4_${i}_pcie = &apciec${i};"$'\n'
-		nodes+=$'\n'"&apciec${i}_dart {"$'\n\t'"status = \"okay\";"$'\n'"};"$'\n'
-		nodes+=$'\n'"&apciec${i} {"$'\n\t'"status = \"okay\";"$'\n'"};"$'\n'
+# 4: boards. The board parts are separate files included from the T600x
+# board .dts files only: t600x-j314-j316.dtsi and t600x-j375.dtsi are also
+# included by T602x boards (j414/j416, j474/j475), which have no APCIEC nodes.
+board_inc() {	# DTSI DTS...
+	local inc=$1 f
+	shift
+	cp "$src/arch/arm64/boot/dts/apple/$inc" arch/arm64/boot/dts/apple/
+	for f; do
+		printf '\n#include "%s"\n' "$inc" >> "arch/arm64/boot/dts/apple/$f"
 	done
-	ins_after "$f" "$3" "${aliases%$'\n'}"
-	python3 - "$f" "$nodes" <<'EOF'
-import sys
-path, text = sys.argv[1:]
-s = open(path).read()
-anchor = s.index('/* USB4 */\n')
-s = s[:anchor] + '/* Tunnelled PCIe (USB4) */\n' + text.lstrip('\n') + '\n' + s[anchor:]
-open(path, 'w').write(s)
-EOF
 }
-board_bits arch/arm64/boot/dts/apple/t600x-j375.dtsi 4 '^\t\tusb4_3_nhi = &usb4_3_nhi;$'
-board_bits arch/arm64/boot/dts/apple/t600x-j314-j316.dtsi 3 '^\t\tusb4_2_nhi = &usb4_2_nhi;$'
+board_inc t600x-j314-j316-apciec.dtsi t6000-j314s.dts t6000-j316s.dts t6001-j314c.dts t6001-j316c.dts
+board_inc t600x-j375-apciec.dtsi t6001-j375c.dts t6002-j375d.dts
 git add arch/arm64/boot/dts/apple
 gc -F - <<EOF
-arm64: dts: apple: t600x-j314-j316, t600x-j375: Enable tunnelled PCIe
+arm64: dts: apple: t600x: Enable tunnelled PCIe on j314, j316 and j375
 
 Enable the tunnelled PCIe controllers of the USB4 ports (0-2 on the
 MacBook Pros, 0-3 on the Mac Studio) and add the usb4_N_pcie aliases the
-bootloader uses to fill in their tunables.
+bootloader uses to fill in their tunables. The board parts are separate
+files included from the T600x board files, because t600x-j314-j316.dtsi and
+t600x-j375.dtsi are shared with T602x boards that have no such controllers.
 
 $trailer
 EOF

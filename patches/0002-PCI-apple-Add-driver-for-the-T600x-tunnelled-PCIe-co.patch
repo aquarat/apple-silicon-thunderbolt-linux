@@ -1,6 +1,6 @@
-From a9c57d3d16a1aa61c7e8f59de744179685f0f445 Mon Sep 17 00:00:00 2001
+From c44bb592066a7baad1e103458d791e442545a09d Mon Sep 17 00:00:00 2001
 From: aquarat <3090997+aquarat@users.noreply.github.com>
-Date: Tue, 20 Oct 2026 07:57:30 +0000
+Date: Tue, 20 Oct 2026 09:33:23 +0000
 Subject: [PATCH 2/4] PCI: apple: Add driver for the T600x tunnelled PCIe
  controllers
 

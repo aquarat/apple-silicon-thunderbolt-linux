@@ -1,0 +1,190 @@
+From fef9d6ce8da6c45de7735c5c5473904fe24f00ef Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 09:33:24 +0000
+Subject: [PATCH 4/4] arm64: dts: apple: t600x: Enable tunnelled PCIe on j314,
+ j316 and j375
+
+Enable the tunnelled PCIe controllers of the USB4 ports (0-2 on the
+MacBook Pros, 0-3 on the Mac Studio) and add the usb4_N_pcie aliases the
+bootloader uses to fill in their tunables. The board parts are separate
+files included from the T600x board files, because t600x-j314-j316.dtsi and
+t600x-j375.dtsi are shared with T602x boards that have no such controllers.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/apple/t6000-j314s.dts     |  2 +
+ arch/arm64/boot/dts/apple/t6000-j316s.dts     |  2 +
+ arch/arm64/boot/dts/apple/t6001-j314c.dts     |  2 +
+ arch/arm64/boot/dts/apple/t6001-j316c.dts     |  2 +
+ arch/arm64/boot/dts/apple/t6001-j375c.dts     |  2 +
+ arch/arm64/boot/dts/apple/t6002-j375d.dts     |  2 +
+ .../dts/apple/t600x-j314-j316-apciec.dtsi     | 40 ++++++++++++++++
+ .../boot/dts/apple/t600x-j375-apciec.dtsi     | 48 +++++++++++++++++++
+ 8 files changed, 100 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi
+ create mode 100644 arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi
+
+diff --git a/arch/arm64/boot/dts/apple/t6000-j314s.dts b/arch/arm64/boot/dts/apple/t6000-j314s.dts
+index afa866684..2c2d8ba2d 100644
+--- a/arch/arm64/boot/dts/apple/t6000-j314s.dts
++++ b/arch/arm64/boot/dts/apple/t6000-j314s.dts
+@@ -41,3 +41,5 @@ &sound {
+ 	compatible = "apple,j314-macaudio", "apple,macaudio";
+ 	model = "MacBook Pro J314";
+ };
++
++#include "t600x-j314-j316-apciec.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t6000-j316s.dts b/arch/arm64/boot/dts/apple/t6000-j316s.dts
+index ddfc3c530..4ed249d49 100644
+--- a/arch/arm64/boot/dts/apple/t6000-j316s.dts
++++ b/arch/arm64/boot/dts/apple/t6000-j316s.dts
+@@ -41,3 +41,5 @@ &sound {
+ 	compatible = "apple,j316-macaudio", "apple,macaudio";
+ 	model = "MacBook Pro J316";
+ };
++
++#include "t600x-j314-j316-apciec.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t6001-j314c.dts b/arch/arm64/boot/dts/apple/t6001-j314c.dts
+index 245df6d03..565fe2dad 100644
+--- a/arch/arm64/boot/dts/apple/t6001-j314c.dts
++++ b/arch/arm64/boot/dts/apple/t6001-j314c.dts
+@@ -41,3 +41,5 @@ &sound {
+ 	compatible = "apple,j314-macaudio", "apple,macaudio";
+ 	model = "MacBook Pro J314";
+ };
++
++#include "t600x-j314-j316-apciec.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t6001-j316c.dts b/arch/arm64/boot/dts/apple/t6001-j316c.dts
+index a000d497b..393161317 100644
+--- a/arch/arm64/boot/dts/apple/t6001-j316c.dts
++++ b/arch/arm64/boot/dts/apple/t6001-j316c.dts
+@@ -41,3 +41,5 @@ &sound {
+ 	compatible = "apple,j316-macaudio", "apple,macaudio";
+ 	model = "MacBook Pro J316";
+ };
++
++#include "t600x-j314-j316-apciec.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t6001-j375c.dts b/arch/arm64/boot/dts/apple/t6001-j375c.dts
+index f3f98f038..db6fb55d1 100644
+--- a/arch/arm64/boot/dts/apple/t6001-j375c.dts
++++ b/arch/arm64/boot/dts/apple/t6001-j375c.dts
+@@ -60,3 +60,5 @@ &gpu {
+ };
+ 
+ #include "hwmon-fan-dual.dtsi"
++
++#include "t600x-j375-apciec.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t6002-j375d.dts b/arch/arm64/boot/dts/apple/t6002-j375d.dts
+index 885744417..afc5843a4 100644
+--- a/arch/arm64/boot/dts/apple/t6002-j375d.dts
++++ b/arch/arm64/boot/dts/apple/t6002-j375d.dts
+@@ -300,3 +300,5 @@ &gpu {
+ };
+ 
+ #include "hwmon-fan-dual.dtsi"
++
++#include "t600x-j375-apciec.dtsi"
+diff --git a/arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi b/arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi
+new file mode 100644
+index 000000000..03121f5c0
+--- /dev/null
++++ b/arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-2.0+ OR MIT
++/*
++ * Board part for the 14"/16" MacBook Pro (j314s/j314c/j316s/j316c): USB4
++ * ports 0-2. Included from the T600x j314/j316 .dts files only:
++ * t600x-j314-j316.dtsi is shared with T602x boards, which have no APCIEC
++ * nodes.
++ */
++
++/ {
++	aliases {
++		/* used by m1n1 to fill the APCIEC tunables */
++		usb4_0_pcie = &apciec0;
++		usb4_1_pcie = &apciec1;
++		usb4_2_pcie = &apciec2;
++	};
++};
++
++&apciec0_dart {
++	status = "okay";
++};
++
++&apciec0 {
++	status = "okay";
++};
++
++&apciec1_dart {
++	status = "okay";
++};
++
++&apciec1 {
++	status = "okay";
++};
++
++&apciec2_dart {
++	status = "okay";
++};
++
++&apciec2 {
++	status = "okay";
++};
+diff --git a/arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi b/arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi
+new file mode 100644
+index 000000000..04eceb1c4
+--- /dev/null
++++ b/arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: GPL-2.0+ OR MIT
++/*
++ * Board part for the Mac Studio (j375c/j375d): USB4 ports 0-3 of die 0.
++ * Included from t6001-j375c.dts and t6002-j375d.dts only: t600x-j375.dtsi
++ * is shared with T602x boards, which have no APCIEC nodes.
++ */
++
++/ {
++	aliases {
++		/* used by m1n1 to fill the APCIEC tunables */
++		usb4_0_pcie = &apciec0;
++		usb4_1_pcie = &apciec1;
++		usb4_2_pcie = &apciec2;
++		usb4_3_pcie = &apciec3;
++	};
++};
++
++&apciec0_dart {
++	status = "okay";
++};
++
++&apciec0 {
++	status = "okay";
++};
++
++&apciec1_dart {
++	status = "okay";
++};
++
++&apciec1 {
++	status = "okay";
++};
++
++&apciec2_dart {
++	status = "okay";
++};
++
++&apciec2 {
++	status = "okay";
++};
++
++&apciec3_dart {
++	status = "okay";
++};
++
++&apciec3 {
++	status = "okay";
++};
+-- 
+2.56.0
+

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /*
  * Board part for the Mac Studio (j375c/j375d): USB4 ports 0-3 of die 0.
- * As a patch these lines go into t600x-j375.dtsi (aliases next to the
- * existing usb4_N_rc ones).
+ * Included from t6001-j375c.dts and t6002-j375d.dts only: t600x-j375.dtsi
+ * is shared with T602x boards, which have no APCIEC nodes.
  */
 
 / {

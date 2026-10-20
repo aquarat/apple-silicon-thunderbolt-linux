@@ -37,7 +37,7 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `Kbuild`, `Makefile` | out-of-tree module build |
 | `Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml` | DT binding |
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
-| `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2) |
+| `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
@@ -117,8 +117,12 @@ acceptable upstream.
 
 `t600x-apciec.dtsi` uses the `DIE_NODE()`/`DIE_NO` macros of
 `t600x-dieX.dtsi` and is included for die 0 from `t6001.dtsi` (and hence
-`t6000.dtsi`) and `t6002.dtsi`. All nodes are disabled there; the board
-files enable the ports they wire up and add the `usb4_N_pcie` aliases. The
+`t6000.dtsi`) and `t6002.dtsi`. All nodes are disabled there. The board
+parts (`t600x-j314-j316-apciec.dtsi`, `t600x-j375-apciec.dtsi`) enable the
+ports each board wires up and add the `usb4_N_pcie` aliases; they are
+included from the T600x board `.dts` files (t6000-j314s/j316s,
+t6001-j314c/j316c/j375c, t6002-j375d), not from the shared
+`t600x-j314-j316.dtsi`/`t600x-j375.dtsi`, which T602x boards include too. The
 second die of the M1 Ultra is not described (its ports are untested).
 
 Note for kernels without the driver: an enabled DART whose controller has no
@@ -127,7 +131,7 @@ driver stays in the deferred-probe list (harmless, visible in
 
 Porting to the Fedora Asahi 7.1.13 tree: the dtsi only needs the
 `ps_atcN_pcie` labels, `&aic`, and the `DIE_NODE` macros, all present there;
-the board hunks go next to the existing `usb4_N_*` aliases.
+the board parts are included the same way.
 
 ## Runtime behaviour
 

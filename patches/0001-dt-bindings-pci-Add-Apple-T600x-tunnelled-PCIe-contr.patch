@@ -1,6 +1,6 @@
-From e8e4a5c5168169b633a8abec414be0465cabdb03 Mon Sep 17 00:00:00 2001
+From 41bea6d0518bae2ac7390bcafdde724ea4f4d70f Mon Sep 17 00:00:00 2001
 From: aquarat <3090997+aquarat@users.noreply.github.com>
-Date: Tue, 20 Oct 2026 07:57:29 +0000
+Date: Tue, 20 Oct 2026 09:33:23 +0000
 Subject: [PATCH 1/4] dt-bindings: pci: Add Apple T600x tunnelled PCIe
  controller
 
@@ -22,7 +22,7 @@ Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
 
 diff --git a/Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml b/Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml
 new file mode 100644
-index 000000000..7e278b218
+index 000000000..9515d5be2
 --- /dev/null
 +++ b/Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml
 @@ -0,0 +1,207 @@

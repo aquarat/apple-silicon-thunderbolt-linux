@@ -28,6 +28,16 @@ Tested on a Mac Studio (M1 Max, j375c) with a UGREEN ASM2464PD NVMe
 enclosure on rear port 3: about 3 GB/s sequential reads, automatic recovery
 from unplug/replug. See "Status" below for what has and has not been tested.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/tb-net-throughput-dark.svg">
+  <img src="docs/images/tb-net-throughput-light.svg" alt="Bar chart of thunderbolt-net single-stream throughput on an M1 Max over a USB4 20 Gb/s x2 link, step by step: unpatched 3.4 Gb/s with frames lost, DMA-coherent NHI 4.2 Gb/s with frames lost, Tx E2E flow control 4.8, RX ring 1024 with threaded NAPI and GRO off 8.2, RX page pool 21.2, Mac Studio to MacBook Pro 21.4, forwarded through a bridge to MTU 1500 19.1 to 19.5 (0.01 before patch 7). A second panel shows CPU at a fixed 5 Gb/s falling from 0.86 to 0.40 cores.">
+</picture>
+
+Thunderbolt networking on Apple silicon, from lossy 3.4 Gb/s to about 21 Gb/s at
+less than half the CPU; measurements and patches in
+[Thunderbolt networking](#thunderbolt-networking-patchestb-net)
+(chart: `tools/plot-tbnet.py`).
+
 ## Layout
 
 | path | what |
@@ -43,8 +53,9 @@ from unplug/replug. See "Status" below for what has and has not been tested.
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI and GRO off for thunderbolt-net interfaces (see Thunderbolt networking) |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
-| `tools/` | test tools: `tb-soak.sh` (filesystem soak with software replugs), `plot-soak.py` (graphs), `tb-port-cycle` / `tipd-4cc` (software replug through the port's USB-C PD controller; the address table is for the Mac Studio) |
+| `tools/` | test tools: `tb-soak.sh` (filesystem soak with software replugs), `plot-soak.py` (graphs), `tb-port-cycle` / `tipd-4cc` (software replug through the port's USB-C PD controller; the address table is for the Mac Studio), `plot-tbnet.py` (the throughput chart above) |
 | `docs/results/` | graphs from the soak runs quoted below |
+| `docs/images/` | the throughput chart (light and dark) |
 
 ## Requirements
 

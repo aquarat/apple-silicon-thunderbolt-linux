@@ -301,6 +301,21 @@ Wi-Fi rate, and local delivery stayed at 20.4-20.5 Gb/s. SHA-256 checked
 1 GiB transfers, forwarded and local, were intact. It works with GRO on or
 off on the receiver.
 
+Since then the whole series runs in a small star network: an M1 Max Mac
+Studio bridges its 10 GbE port and all four of its Thunderbolt ports, and
+other Macs reach the LAN only through it, over Thunderbolt, with their
+Ethernet unplugged. Tested peers: an M1 Mac mini (20 Gb/s x2 link,
+~18.5 Gb/s each way to the bridging Mac) and an M1 Ultra Mac Studio
+(15.9 / 18.9 Gb/s), whose own bridge carries its virtual machines' traffic
+over the Thunderbolt link; the two spokes reach each other through the
+bridge at ~13.1 Gb/s. Both survived reboots of either end without manual
+steps. On the M1 Mac mini one Type-C port controller occasionally fails to
+probe at boot (an i2c timeout); without it the port never links, so a Mac
+that depends on the cable should retry the bind. Retransmits measured when
+forwarding from a veth into the link turned out to be the veth reordering
+locally sent TSO packets (with RPS on the veth: 19.3 Gb/s, none), not the
+Thunderbolt path.
+
 ## Status and known issues
 
 Tested (Mac Studio M1 Max, port 3, ASM2464PD + Samsung SM961, asahi-wip

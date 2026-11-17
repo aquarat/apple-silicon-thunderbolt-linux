@@ -1,0 +1,123 @@
+From 8c3af5caf99b813f4a23ee29cce68ec73ef45e3b Mon Sep 17 00:00:00 2001
+From: aquarat <3090997+aquarat@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 14:50:13 +0000
+Subject: [PATCH] net: thunderbolt: Segment TSO packets the receiver would cut
+ differently
+
+ThunderboltIP has no field for the segment size of a TSO packet. Since
+"net: thunderbolt: Make oversized TSO packets forwardable" the receiver
+turns such a packet back into a GSO packet with an MSS of its own MTU
+minus the packet's IP and TCP headers. That gives back the sender's
+segments only if they had exactly that size. When path MTU discovery or
+an MSS clamp has lowered the sender's MSS, a receiver that forwards the
+packet sends on segments larger than the sender meant to, and the hop
+with the smaller MTU drops them. The sender is already at the lower MSS,
+so TCP stalls at a congestion window of about two segments: from a
+Thunderbolt peer bridged to a LAN, uploads to a service behind an
+overlay network with MTU 1450 ran at under 1 MB/s instead of about
+150 MB/s, with a "fragmentation needed" message for nearly every
+segment.
+
+Add an ndo_features_check that keeps TSO only for TCP packets whose
+gso_size is the MTU minus their IP and TCP header length, the size the
+receiver will use, and segments every other GSO packet in software
+before it is split into Thunderbolt frames: a lower MSS, IPv6 with
+extension headers and encapsulated packets (the receiver leaves the last
+two oversized). A full-sized MSS, the common case, keeps the TSO path.
+Both ends of the link are assumed to have the same MTU.
+
+Carrying the segment size in the frame header would change the wire
+protocol that macOS and other peers speak, and the receiver cannot know
+the MTU of hops beyond it, so the sender has to do this.
+
+Also correct the receive side's comment, which said the local MTU's
+MSS is at most what the peer's segments used.
+
+Fixes: 9767c2a39959 ("net: thunderbolt: Make oversized TSO packets forwardable")
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ drivers/net/thunderbolt/main.c | 56 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/thunderbolt/main.c b/drivers/net/thunderbolt/main.c
+index 289b1766e..e509bac5d 100644
+--- a/drivers/net/thunderbolt/main.c
++++ b/drivers/net/thunderbolt/main.c
+@@ -837,8 +837,16 @@ static bool tbnet_check_frame(struct tbnet *net, const struct tbnet_frame *tf,
+  * than the MTU. The local stack accepts that, but such a packet cannot be
+  * forwarded (bridged or routed) to an interface with a normal MTU and is
+  * dropped there. Turn it into a GSO packet, the way GRO does, so the stack
+- * segments it on the way out. The MSS is derived from our MTU, which the
+- * peer's segments would not have exceeded either.
++ * segments it on the way out.
++ *
++ * ThunderboltIP does not carry the peer's segment size, so the MSS is
++ * derived from our MTU. That is only right if the peer's segments had
++ * exactly that size. When path MTU discovery or an MSS clamp lowered the
++ * peer's MSS, we would send on larger segments than the peer meant to, and
++ * a smaller hop further on drops them while the peer cannot go any lower.
++ * tbnet_features_check() on the sending side prevents that: it segments
++ * any TSO packet built for another MSS before sending it. A peer without
++ * it (an older kernel, another OS) can still hit this.
+  *
+  * The peer computed the TCP checksum over the whole packet; verify it
+  * here, because the segments get new checksums later.
+@@ -1429,10 +1437,54 @@ static void tbnet_get_stats64(struct net_device *dev,
+ 	stats->rx_missed_errors = net->stats.rx_missed_errors;
+ }
+ 
++/*
++ * The receiver cannot tell what segment size a TSO packet was built for:
++ * tbnet_rx_gso() there cuts it at its MTU minus the packet's IP and TCP
++ * headers. Send a TSO packet as one only if that gives back the segments
++ * it was built for, which is the common case of a full-sized MSS. Anything
++ * else (a lower MSS from path MTU discovery or an MSS clamp, IPv6
++ * extension headers, encapsulation) is segmented here in software instead,
++ * so the receiver gets packets that fit its MTU and forwards them as they
++ * are. Both ends of the link are assumed to have the same MTU.
++ */
++static netdev_features_t tbnet_features_check(struct sk_buff *skb,
++					      struct net_device *dev,
++					      netdev_features_t features)
++{
++	unsigned int gso_type, hdrlen;
++
++	features = vlan_features_check(skb, features);
++	if (!skb_is_gso(skb))
++		return features;
++
++	gso_type = skb_shinfo(skb)->gso_type;
++	if (skb->encapsulation)
++		goto segment;
++	if (skb->protocol == htons(ETH_P_IP)) {
++		if (!(gso_type & SKB_GSO_TCPV4))
++			goto segment;
++	} else if (skb->protocol == htons(ETH_P_IPV6)) {
++		if (!(gso_type & SKB_GSO_TCPV6) ||
++		    ipv6_hdr(skb)->nexthdr != IPPROTO_TCP)
++			goto segment;
++	} else {
++		goto segment;
++	}
++
++	hdrlen = skb_tcp_all_headers(skb) - skb_network_offset(skb);
++	if (hdrlen < dev->mtu &&
++	    skb_shinfo(skb)->gso_size == dev->mtu - hdrlen)
++		return features;
++
++segment:
++	return features & ~NETIF_F_GSO_MASK;
++}
++
+ static const struct net_device_ops tbnet_netdev_ops = {
+ 	.ndo_open = tbnet_open,
+ 	.ndo_stop = tbnet_stop,
+ 	.ndo_start_xmit = tbnet_start_xmit,
++	.ndo_features_check = tbnet_features_check,
+ 	.ndo_set_mac_address = eth_mac_addr,
+ 	.ndo_get_stats64 = tbnet_get_stats64,
+ };
+-- 
+2.56.0
+

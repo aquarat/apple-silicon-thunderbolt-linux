@@ -49,7 +49,7 @@ less than half the CPU; measurements and patches in
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
-| `patches/tb-net/` | separate 7-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
+| `patches/tb-net/` | separate 8-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI and GRO off for thunderbolt-net interfaces (see Thunderbolt networking) |
 | `scripts/make-patches.sh` | regenerates `patches/` from this tree on a kernel git checkout |
@@ -234,6 +234,14 @@ asahi-wip 7.2.11 (independent of the APCIEC series):
    sender (which caps it at about 5.4 Gb/s). Such packets are now verified
    and marked as GSO packets on receive, like GRO does, and segmented on the
    way out. Not Apple-specific.
+8. `net: thunderbolt: Segment TSO packets the receiver would cut differently`:
+   ThunderboltIP does not carry a TSO packet's segment size, so patch 7's
+   receiver cuts it at its own MTU. When path MTU discovery or an MSS clamp
+   has lowered the sender's MSS (a VPN, tunnel or overlay network behind
+   the bridging Mac), the forwarded segments are too large for the smaller
+   hop and TCP crawls at under 1 MB/s. The sender now keeps TSO only for
+   full-sized segments and segments everything else in software. Needed on
+   every sender; not Apple-specific.
 
 Measured with a USB4 cable between two ports of one Mac Studio (M1 Max, one end
 in a network namespace, 20 Gb/s x2, MTU 65522, iperf3):

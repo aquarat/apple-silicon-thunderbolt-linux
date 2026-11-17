@@ -1,4 +1,4 @@
-From e0bb75c3cc1d818d5650716f73e2e5df8a578039 Mon Sep 17 00:00:00 2001
+From 9767c2a39959a8e408e0de78c4fea1ec762c17fd Mon Sep 17 00:00:00 2001
 From: aquarat <3090997+aquarat@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 23:00:18 +0000
 Subject: [PATCH] net: thunderbolt: Make oversized TSO packets forwardable
@@ -19,10 +19,14 @@ TCP packet is larger than the MTU, verify the checksum the peer computed,
 replace it with the pseudo header checksum, set CHECKSUM_PARTIAL and
 gso_size/gso_segs/gso_type (DODGY, as the headers come from the peer).
 The stack then segments the packet on the way out, in software or by the
-egress device's TSO. The MSS is derived from the local MTU, which is at
-most what the peer's segments would have used on a link with matching
-MTUs. Local delivery is unchanged apart from the checksum being verified
-here instead of by TCP.
+egress device's TSO. ThunderboltIP does not carry the peer's segment
+size, so the MSS is derived from the local MTU. That matches the peer's
+segments only when they were full-sized for that MTU: if path MTU
+discovery or an MSS clamp lowered the peer's MSS, the segments sent on
+are larger than the peer meant, and a smaller hop further on drops them.
+The next patch makes the sender segment such packets itself. Local
+delivery is unchanged apart from the checksum being verified here
+instead of by TCP.
 
 Measured on M1 Max (Apple USB4 NHI) to M1 Max over 2x20 Gb/s, MTU 1500,
 peer TSO on, from the peer through a bridge into a veth (MTU 1500):

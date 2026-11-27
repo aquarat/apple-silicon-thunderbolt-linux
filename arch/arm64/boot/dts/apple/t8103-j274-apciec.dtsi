@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Board part for the M1 Mac mini (j274): USB4 ports 0-1. Included from
+ * t8103-j274.dts. The other T8103 boards are untested and get no board part
+ * yet.
+ */
+
+/ {
+	aliases {
+		/* used by m1n1 to fill the APCIEC tunables */
+		usb4_0_pcie = &apciec0;
+		usb4_1_pcie = &apciec1;
+	};
+};
+
+&apciec0_dart {
+	status = "okay";
+};
+
+&apciec0 {
+	status = "okay";
+};
+
+&apciec1_dart {
+	status = "okay";
+};
+
+&apciec1 {
+	status = "okay";
+};

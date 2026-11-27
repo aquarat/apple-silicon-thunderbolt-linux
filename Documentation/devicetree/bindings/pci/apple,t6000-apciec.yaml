@@ -18,7 +18,8 @@ description: |
 
   The root port uses the same port register block as the internal PCIe
   controller (apple,pcie), extended by a tunnel reset handshake. The port has
-  its own DART (apple,t8110-dart), which only responds while the port's
+  its own DART (apple,t8110-dart; apple,t8103-usb4-dart on the T8103), which
+  only responds while the port's
   application clock is running. The controller therefore provides that clock
   (#clock-cells = <0>) and the DART must reference it in its "clocks"
   property.
@@ -31,8 +32,15 @@ description: |
 properties:
   compatible:
     description:
-      Shared by T6000 (M1 Pro), T6001 (M1 Max) and T6002 (M1 Ultra).
-    const: apple,t6000-apciec
+      apple,t6000-apciec is shared by T6000 (M1 Pro), T6001 (M1 Max) and
+      T6002 (M1 Ultra). The T8103 (M1) controller has the same register
+      layout and is driven as a T6000 one; its DART is an
+      apple,t8103-usb4-dart.
+    oneOf:
+      - const: apple,t6000-apciec
+      - items:
+          - const: apple,t8103-apciec
+          - const: apple,t6000-apciec
 
   reg:
     items:

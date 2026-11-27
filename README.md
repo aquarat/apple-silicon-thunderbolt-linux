@@ -48,6 +48,7 @@ less than half the CPU; measurements and patches in
 | `Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml` | DT binding |
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
+| `arch/arm64/boot/dts/apple/t8103-apciec.dtsi`, `t8103-j274-apciec.dtsi` | the same for the T8103 (M1): SoC nodes for USB4 ports 0-1 and the M1 Mac mini board part (see "M1 (T8103)" below; not in `patches/` yet) |
 | `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
 | `patches/tb-net/` | separate 8-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
@@ -145,6 +146,47 @@ driver stays in the deferred-probe list (harmless, visible in
 Porting to the Fedora Asahi 7.1.13 tree: the dtsi only needs the
 `ps_atcN_pcie` labels, `&aic`, and the `DIE_NODE` macros, all present there;
 the board parts are included the same way.
+
+### M1 (T8103)
+
+The M1 has the same two-register-block controller behind each of its two
+USB4 ports, at the same offsets from the port's ATC base (`0x3_8000_0000`,
+`0x5_0000_0000`), and the unmodified driver runs it through the fallback
+compatible (`"apple,t8103-apciec", "apple,t6000-apciec"`). The values in
+`t8103-apciec.dtsi` are those of the Apple device tree of an M1 Mac mini
+(`/arm-io/apciec0`, `apciec1`, `dart-apciec0`, `dart-apciec1`). What differs
+from the T600x nodes:
+
+- **DART.** It is a T8020-type DART with 64 stream IDs:
+  `apple,t8103-usb4-dart`, which apple-dart already knows but no shipped
+  device tree used.
+- **Windows.** Each port only has 6 GiB of address space, so the windows are
+  smaller (2 GiB 64-bit prefetchable, 1 GiB 32-bit, 1 GiB 32-bit
+  prefetchable) and differ between the ports. Port 0's 32-bit windows are at
+  bus `0x80000000` and `0xc0000000`, which puts the MSI doorbell
+  (`0xfffff000`) inside the prefetchable one; the dtsi leaves the last 1 MiB
+  of that window out.
+- **Interrupts.** AIC specifiers have three cells (no die number). Port 0:
+  management 770, DART 771, MSIs 738-769; port 1: 850, 851, 818-849.
+- **Power.** `ps_atc0_pcie`/`ps_atc1_pcie` exist in `t8103-pmgr.dtsi`. The
+  Apple device tree lists a second gate per port (`AUSBn_AONPCIE-V`, a child
+  of `ATCn_USB_AON`); it is not described and was not needed.
+- **Tunables.** m1n1 1.9.9 copies them without changes: the four property
+  names and the entry format are the same as on the T600x.
+
+`t8103-apciec.dtsi` is included from `t8103.dtsi` (the `soc` node has no
+label there, so it extends `/soc` by path) and `t8103-j274-apciec.dtsi` from
+`t8103-j274.dts`. Built that way against the asahi-7.3.4-2 sources the
+result is, apart from phandle numbers and `status = "okay"`, the device tree
+the test below ran on. The other T8103 boards are untested (their Apple
+device trees were not checked) and have no board part.
+
+Without rebuilding the kernel, the nodes can be added to the installed
+`t8103-j274.dtb` (decompile with `dtc`, append the nodes with path
+references, recompile) and that DTB put into m1n1's `boot.bin` in place of
+the stock one. On Fedora Asahi `update-m1n1` builds `boot.bin` from
+`$DTBS`, and `/etc/sysconfig/update-m1n1` is sourced as shell, so `DTBS` can
+point at a directory with the patched copy.
 
 ## Runtime behaviour
 
@@ -341,8 +383,32 @@ An earlier version of the driver ran a 2 h soak (7 rounds, 3 replugs) and
 
 Drive temperature in these runs (enclosure without its heatsink) sat at the
 SM961's 70 °C warning threshold under sustained load, and the drive
-throttled; fit the heatsink for sustained transfers. Not tested: ports 0-2 (wired the same
-way), other enclosures, M1 Pro (t6000), M1 Ultra (t6002), MacBook Pros.
+throttled; fit the heatsink for sustained transfers. Not tested on the
+T600x: ports 0-2 (wired the same way), other enclosures, M1 Pro (t6000),
+M1 Ultra (t6002), MacBook Pros.
+
+Also tested on the M1 (2026-11-26): M1 Mac mini (j274), port 1, Fedora
+Asahi Remix 44 with its stock kernel 7.3.4-401.asahi (which ships the USB4
+series) and m1n1 1.9.9, the driver built out of tree from this repository
+without changes, and a Thunderbolt 3 10GbE adapter (Intel JHL7440 with an
+Aquantia AQC113 and an xHCI controller behind it). The link trained on the
+first attempt ("link up after 0 retrain(s)"), the `atlantic` and `xhci_hcd`
+drivers bound, and iperf3 against a 10GbE Mac measured 9.4 Gbit/s in both
+directions (one stream and four streams, 10 s each, about 44 GB in total,
+one TCP retransmit, no interface errors). It came back by itself after two
+reboots. Not tested on the M1: port 0 (its controller and DART probe
+cleanly, nothing was plugged in), hot replug, NVMe enclosures, long soaks,
+other T8103 boards. The only messages are the bridges' I/O port windows
+that cannot be assigned (the controller has no I/O space).
+
+Two things to know when installing the module on Fedora:
+
+- SELinux refuses `insmod` of a module file in a home directory
+  (`module_load` denied on `user_home_t`). Install it under
+  `/lib/modules`, or label the file `modules_object_t`.
+- Packaged with DKMS, the module ends up in the initramfs the next time
+  dracut runs, and udev then loads it there by its OF alias. Add it to
+  `omit_drivers` in `/etc/dracut.conf.d/` to load it later instead.
 
 Known issues, accepted for release:
 

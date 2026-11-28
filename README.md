@@ -449,6 +449,20 @@ sampler of throughput, temperature and port state. It needs fio, btrfs-progs,
 smartmontools, bc, and `tb-port-cycle`/`tipd-4cc` on the PATH for replugs.
 `tools/plot-soak.py RUN_DIR` turns a run into SVG/PNG graphs (matplotlib).
 
+## Contributing
+
+Contributions are welcome: bug reports, results from other machines, and pull
+requests. Work done with AI coding assistants or agents is welcome too; most
+of this repository was written that way. Please review and test what you
+submit, say in the pull request what you tested it on, and mention the AI tool
+if you used one. Patches in kernel form carry an `Assisted-by:` tag
+(`Documentation/process/coding-assistants.rst`) when an AI tool helped.
+
+Asahi Linux does not accept generative-AI material in contributions, because
+of its clean-room reverse-engineering requirements
+([policy](https://asahilinux.org/llm-policy/)). If you contribute to Asahi,
+read that policy before you read the code here.
+
 ## Credits
 
 - The Apple USB4/Thunderbolt support this builds on (NHI, ACIO, atcphy USB4

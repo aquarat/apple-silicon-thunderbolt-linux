@@ -1,6 +1,6 @@
 # apple-silicon-thunderbolt-linux
 
-PCIe over Thunderbolt/USB4 for Apple M1 Pro/Max/Ultra Macs on Linux: the
+PCIe over Thunderbolt/USB4 for Apple M1, M1 Pro/Max/Ultra Macs on Linux: the
 `pcie-apple-apciec` driver, its device-tree binding and nodes, and the tools
 used to test it.
 
@@ -13,9 +13,10 @@ Ready-made Fedora Asahi Remix packages that include it are planned in
 
 A Linux PCIe host driver and device-tree binding for the PCIe root complexes
 ("APCIEC") behind the USB4/Thunderbolt ports of Apple T600x SoCs (M1 Pro,
-M1 Max, M1 Ultra). With it, PCIe devices in USB4/Thunderbolt enclosures, such
-as NVMe drives, work under Linux. Licence: GPL-2.0-only (driver), GPL-2.0-only
-OR BSD-2-Clause (binding), GPL-2.0+ OR MIT (DTS), as usual for these trees.
+M1 Max, M1 Ultra) and the T8103 (M1). With it, PCIe devices in
+USB4/Thunderbolt enclosures, such as NVMe drives, work under Linux. Licence:
+GPL-2.0-only (driver), GPL-2.0-only OR BSD-2-Clause (binding), GPL-2.0+ OR
+MIT (DTS), as usual for these trees.
 
 Each USB4 port has its own root complex with one root port. The root port's
 link never leaves the SoC. It runs over a PCIe tunnel that the USB4
@@ -26,7 +27,9 @@ handshake.
 
 Tested on a Mac Studio (M1 Max, j375c) with a UGREEN ASM2464PD NVMe
 enclosure on rear port 3: about 3 GB/s sequential reads, automatic recovery
-from unplug/replug. See "Status" below for what has and has not been tested.
+from unplug/replug. Also tested on an M1 Mac mini (j274) with a Thunderbolt 3
+10GbE adapter at 9.4 Gbit/s both ways (fewer tests, see "M1 (T8103)"). See
+"Status" below for what has and has not been tested.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/tb-net-throughput-dark.svg">
@@ -48,8 +51,8 @@ less than half the CPU; measurements and patches in
 | `Documentation/devicetree/bindings/pci/apple,t6000-apciec.yaml` | DT binding |
 | `arch/arm64/boot/dts/apple/t600x-apciec.dtsi` | SoC nodes: APCIEC + DART for USB4 ports 0-3 of a die |
 | `arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi`, `t600x-j314-j316-apciec.dtsi` | board parts (Mac Studio ports 0-3, 14"/16" MacBook Pro ports 0-2), included from the T600x board `.dts` files |
-| `arch/arm64/boot/dts/apple/t8103-apciec.dtsi`, `t8103-j274-apciec.dtsi` | the same for the T8103 (M1): SoC nodes for USB4 ports 0-1 and the M1 Mac mini board part (see "M1 (T8103)" below; not in `patches/` yet) |
-| `patches/` | the same as a 4-patch series on asahi-wip 7.2.11 (`git am`-able) |
+| `arch/arm64/boot/dts/apple/t8103-apciec.dtsi`, `t8103-j274-apciec.dtsi` | the same for the T8103 (M1): SoC nodes for USB4 ports 0-1 and the M1 Mac mini board part (see "M1 (T8103)" below) |
+| `patches/` | the same as a 6-patch series on asahi-wip 7.2.11 (`git am`-able) |
 | `patches/tb-net/` | separate 8-patch series for Thunderbolt networking (thunderbolt-net) on the Apple NHI, see below |
 | `udev/60-apciec-nvme-apst.rules` | NVMe APST policy for drives behind APCIEC |
 | `udev/61-thunderbolt-net-threaded.rules` | threaded NAPI and GRO off for thunderbolt-net interfaces (see Thunderbolt networking) |
@@ -176,10 +179,12 @@ from the T600x nodes:
 
 `t8103-apciec.dtsi` is included from `t8103.dtsi` (the `soc` node has no
 label there, so it extends `/soc` by path) and `t8103-j274-apciec.dtsi` from
-`t8103-j274.dts`. Built that way against the asahi-7.3.4-2 sources the
-result is, apart from phandle numbers and `status = "okay"`, the device tree
-the test below ran on. The other T8103 boards are untested (their Apple
-device trees were not checked) and have no board part.
+`t8103-j274.dts` (patches 5 and 6). Built that way against the asahi-7.3.4-2
+sources the result is, apart from phandle numbers and `status = "okay"`,
+the device tree the test below ran on. On asahi-wip 7.2.11 the binding
+passes `dt_binding_check` and the j274 DTB passes `CHECK_DTBS` against it
+(dtschema 2026.9). The other T8103 boards are untested (their Apple device
+trees were not checked) and have no board part.
 
 Without rebuilding the kernel, the nodes can be added to the installed
 `t8103-j274.dtb` (decompile with `dtc`, append the nodes with path

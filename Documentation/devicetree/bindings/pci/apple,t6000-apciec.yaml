@@ -4,25 +4,24 @@
 $id: http://devicetree.org/schemas/pci/apple,t6000-apciec.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Apple T600x tunnelled PCIe root complex (APCIEC)
+title: Apple T600x and T8103 tunnelled PCIe root complex (APCIEC)
 
 maintainers:
   - aquarat <3090997+aquarat@users.noreply.github.com>
 
 description: |
   Each USB4/Thunderbolt port of the Apple T600x SoCs (M1 Pro, M1 Max, M1
-  Ultra) has its own PCIe root complex with a single root port. The link of
-  that root port does not leave the SoC: it is carried by a PCIe tunnel that
-  the USB4 connection manager sets up between the port's PCIe down adapter
-  and the PCIe up adapter of the attached router.
+  Ultra) and of the T8103 (M1) has its own PCIe root complex with a single
+  root port. The link of that root port does not leave the SoC: it is carried
+  by a PCIe tunnel that the USB4 connection manager sets up between the
+  port's PCIe down adapter and the PCIe up adapter of the attached router.
 
   The root port uses the same port register block as the internal PCIe
   controller (apple,pcie), extended by a tunnel reset handshake. The port has
   its own DART (apple,t8110-dart; apple,t8103-usb4-dart on the T8103), which
-  only responds while the port's
-  application clock is running. The controller therefore provides that clock
-  (#clock-cells = <0>) and the DART must reference it in its "clocks"
-  property.
+  only responds while the port's application clock is running. The
+  controller therefore provides that clock (#clock-cells = <0>) and the DART
+  must reference it in its "clocks" property.
 
   The register tunables (apple,tunable-*) are per-device calibration data that
   the bootloader (m1n1 1.6.1 or later) copies into the device tree. It finds

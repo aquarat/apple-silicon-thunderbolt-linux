@@ -1,7 +1,7 @@
-From c44bb592066a7baad1e103458d791e442545a09d Mon Sep 17 00:00:00 2001
+From a2ffde4c8c1054e03485122068d8e359eef6ed78 Mon Sep 17 00:00:00 2001
 From: aquarat <3090997+aquarat@users.noreply.github.com>
-Date: Tue, 20 Oct 2026 09:33:23 +0000
-Subject: [PATCH 2/4] PCI: apple: Add driver for the T600x tunnelled PCIe
+Date: Fri, 27 Nov 2026 23:59:52 +0000
+Subject: [PATCH 2/6] PCI: apple: Add driver for the T600x tunnelled PCIe
  controllers
 
 Add a host driver for the PCIe root complexes ("APCIEC") behind the
@@ -29,7 +29,8 @@ would first unbind the DART (a consumer of its clock), whose device links
 unbind the PCI functions parents first, and a bridge losing its driver stops
 forwarding DMA for the functions below it.
 
-Tested on a Mac Studio (M1 Max) with an ASM2464PD NVMe enclosure.
+Tested on a Mac Studio (M1 Max) with an ASM2464PD NVMe enclosure, and on
+an M1 Mac mini with a Thunderbolt 3 10GbE adapter.
 
 Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
@@ -42,7 +43,7 @@ Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
  create mode 100644 drivers/pci/controller/pcie-apple-apciec.c
 
 diff --git a/MAINTAINERS b/MAINTAINERS
-index 9d844d031..55a37d22e 100644
+index 9d844d031a74..55a37d22ec16 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
 @@ -2643,6 +2643,7 @@ F:	drivers/mfd/macsmc.c
@@ -54,7 +55,7 @@ index 9d844d031..55a37d22e 100644
  F:	drivers/pinctrl/pinctrl-apple-gpio.c
  F:	drivers/power/reset/macsmc-reboot.c
 diff --git a/drivers/pci/controller/Kconfig b/drivers/pci/controller/Kconfig
-index 420db1255..6be765bff 100644
+index 420db1255346..6be765bff6ce 100644
 --- a/drivers/pci/controller/Kconfig
 +++ b/drivers/pci/controller/Kconfig
 @@ -55,6 +55,22 @@ config PCIE_APPLE
@@ -81,7 +82,7 @@ index 420db1255..6be765bff 100644
  	bool "ARM Versatile PB PCI controller"
  	depends on ARCH_VERSATILE || COMPILE_TEST
 diff --git a/drivers/pci/controller/Makefile b/drivers/pci/controller/Makefile
-index ac8db283f..10609ba6b 100644
+index ac8db283f0fe..10609ba6bfa3 100644
 --- a/drivers/pci/controller/Makefile
 +++ b/drivers/pci/controller/Makefile
 @@ -39,6 +39,7 @@ obj-$(CONFIG_PCIE_BRCMSTB) += pcie-brcmstb.o
@@ -94,7 +95,7 @@ index ac8db283f..10609ba6b 100644
  
 diff --git a/drivers/pci/controller/pcie-apple-apciec.c b/drivers/pci/controller/pcie-apple-apciec.c
 new file mode 100644
-index 000000000..99601c982
+index 000000000000..99601c982fe7
 --- /dev/null
 +++ b/drivers/pci/controller/pcie-apple-apciec.c
 @@ -0,0 +1,1177 @@

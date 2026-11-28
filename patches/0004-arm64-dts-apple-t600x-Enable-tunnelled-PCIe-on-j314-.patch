@@ -1,7 +1,7 @@
-From fef9d6ce8da6c45de7735c5c5473904fe24f00ef Mon Sep 17 00:00:00 2001
+From 7f572b2060701f18f789830404907926d9e56a06 Mon Sep 17 00:00:00 2001
 From: aquarat <3090997+aquarat@users.noreply.github.com>
-Date: Tue, 20 Oct 2026 09:33:24 +0000
-Subject: [PATCH 4/4] arm64: dts: apple: t600x: Enable tunnelled PCIe on j314,
+Date: Fri, 27 Nov 2026 23:59:52 +0000
+Subject: [PATCH 4/6] arm64: dts: apple: t600x: Enable tunnelled PCIe on j314,
  j316 and j375
 
 Enable the tunnelled PCIe controllers of the USB4 ports (0-2 on the
@@ -26,7 +26,7 @@ Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
  create mode 100644 arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi
 
 diff --git a/arch/arm64/boot/dts/apple/t6000-j314s.dts b/arch/arm64/boot/dts/apple/t6000-j314s.dts
-index afa866684..2c2d8ba2d 100644
+index afa86668440f..2c2d8ba2df0c 100644
 --- a/arch/arm64/boot/dts/apple/t6000-j314s.dts
 +++ b/arch/arm64/boot/dts/apple/t6000-j314s.dts
 @@ -41,3 +41,5 @@ &sound {
@@ -36,7 +36,7 @@ index afa866684..2c2d8ba2d 100644
 +
 +#include "t600x-j314-j316-apciec.dtsi"
 diff --git a/arch/arm64/boot/dts/apple/t6000-j316s.dts b/arch/arm64/boot/dts/apple/t6000-j316s.dts
-index ddfc3c530..4ed249d49 100644
+index ddfc3c530923..4ed249d49448 100644
 --- a/arch/arm64/boot/dts/apple/t6000-j316s.dts
 +++ b/arch/arm64/boot/dts/apple/t6000-j316s.dts
 @@ -41,3 +41,5 @@ &sound {
@@ -46,7 +46,7 @@ index ddfc3c530..4ed249d49 100644
 +
 +#include "t600x-j314-j316-apciec.dtsi"
 diff --git a/arch/arm64/boot/dts/apple/t6001-j314c.dts b/arch/arm64/boot/dts/apple/t6001-j314c.dts
-index 245df6d03..565fe2dad 100644
+index 245df6d03ee4..565fe2dad65b 100644
 --- a/arch/arm64/boot/dts/apple/t6001-j314c.dts
 +++ b/arch/arm64/boot/dts/apple/t6001-j314c.dts
 @@ -41,3 +41,5 @@ &sound {
@@ -56,7 +56,7 @@ index 245df6d03..565fe2dad 100644
 +
 +#include "t600x-j314-j316-apciec.dtsi"
 diff --git a/arch/arm64/boot/dts/apple/t6001-j316c.dts b/arch/arm64/boot/dts/apple/t6001-j316c.dts
-index a000d497b..393161317 100644
+index a000d497b705..393161317b22 100644
 --- a/arch/arm64/boot/dts/apple/t6001-j316c.dts
 +++ b/arch/arm64/boot/dts/apple/t6001-j316c.dts
 @@ -41,3 +41,5 @@ &sound {
@@ -66,7 +66,7 @@ index a000d497b..393161317 100644
 +
 +#include "t600x-j314-j316-apciec.dtsi"
 diff --git a/arch/arm64/boot/dts/apple/t6001-j375c.dts b/arch/arm64/boot/dts/apple/t6001-j375c.dts
-index f3f98f038..db6fb55d1 100644
+index f3f98f038009..db6fb55d1772 100644
 --- a/arch/arm64/boot/dts/apple/t6001-j375c.dts
 +++ b/arch/arm64/boot/dts/apple/t6001-j375c.dts
 @@ -60,3 +60,5 @@ &gpu {
@@ -76,7 +76,7 @@ index f3f98f038..db6fb55d1 100644
 +
 +#include "t600x-j375-apciec.dtsi"
 diff --git a/arch/arm64/boot/dts/apple/t6002-j375d.dts b/arch/arm64/boot/dts/apple/t6002-j375d.dts
-index 885744417..afc5843a4 100644
+index 885744417f0a..afc5843a48c7 100644
 --- a/arch/arm64/boot/dts/apple/t6002-j375d.dts
 +++ b/arch/arm64/boot/dts/apple/t6002-j375d.dts
 @@ -300,3 +300,5 @@ &gpu {
@@ -87,7 +87,7 @@ index 885744417..afc5843a4 100644
 +#include "t600x-j375-apciec.dtsi"
 diff --git a/arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi b/arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi
 new file mode 100644
-index 000000000..03121f5c0
+index 000000000000..03121f5c0435
 --- /dev/null
 +++ b/arch/arm64/boot/dts/apple/t600x-j314-j316-apciec.dtsi
 @@ -0,0 +1,40 @@
@@ -133,7 +133,7 @@ index 000000000..03121f5c0
 +};
 diff --git a/arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi b/arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi
 new file mode 100644
-index 000000000..04eceb1c4
+index 000000000000..04eceb1c4b04
 --- /dev/null
 +++ b/arch/arm64/boot/dts/apple/t600x-j375-apciec.dtsi
 @@ -0,0 +1,48 @@

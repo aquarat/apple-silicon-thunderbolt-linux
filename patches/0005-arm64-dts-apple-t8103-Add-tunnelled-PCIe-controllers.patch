@@ -1,0 +1,175 @@
+From 534c5da41c00aa96db3d28b575a8351219f55642 Mon Sep 17 00:00:00 2001
+From: jshay21 <5350197+jshay21@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 23:59:52 +0000
+Subject: [PATCH 5/6] arm64: dts: apple: t8103: Add tunnelled PCIe controllers
+
+Add the tunnelled PCIe root complexes of USB4 ports 0-1 and their DARTs,
+disabled. The values are those of the Apple device tree of an M1 Mac mini.
+Compared with the T600x nodes, the DART is an apple,t8103-usb4-dart
+(T8020-type, 64 stream IDs), the MMIO windows are smaller and differ
+between the ports, the last 1 MiB of port 0's 32-bit prefetchable window is
+left out to keep BARs off the MSI doorbell, and AIC specifiers have three
+cells.
+
+Assisted-by: Claude:claude-fable-5-2
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/apple/t8103-apciec.dtsi | 135 ++++++++++++++++++++
+ arch/arm64/boot/dts/apple/t8103.dtsi        |   1 +
+ 2 files changed, 136 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/apple/t8103-apciec.dtsi
+
+diff --git a/arch/arm64/boot/dts/apple/t8103-apciec.dtsi b/arch/arm64/boot/dts/apple/t8103-apciec.dtsi
+new file mode 100644
+index 000000000000..c98fa4e1c68a
+--- /dev/null
++++ b/arch/arm64/boot/dts/apple/t8103-apciec.dtsi
+@@ -0,0 +1,135 @@
++// SPDX-License-Identifier: GPL-2.0+ OR MIT
++/*
++ * Tunnelled PCIe root complexes (APCIEC) behind USB4 ports 0-1 of the T8103
++ * (M1), with their DARTs. Included from t8103.dtsi. Boards enable the ports
++ * they wire up, together with the matching DART, and add the usb4_N_pcie
++ * aliases that the bootloader uses to fill in the tunables.
++ *
++ * The DART only responds while the port application clock runs; the
++ * controller provides that clock (clocks = <&apciecN>).
++ *
++ * Differences from t600x-apciec.dtsi:
++ *  - The register blocks sit at the same offsets from the port's ATC base
++ *    (0x3_8000_0000 and 0x5_0000_0000), but the T8103 leaves only 6 GiB per
++ *    port, so the MMIO windows are smaller and differ between the two ports.
++ *    They are the windows of the Apple device tree.
++ *  - Port 0's 32-bit windows are at bus 0x80000000 and 0xc0000000. The last
++ *    1 MiB of the prefetchable one is left out so that no BAR can be placed
++ *    on the MSI doorbell (0xfffff000).
++ *  - The DART is a T8020-type DART with 64 stream IDs: apple,t8103-usb4-dart.
++ *  - AIC interrupt specifiers have three cells (no die number).
++ *  - The Apple device tree lists a second power gate per port
++ *    (AUSBn_AONPCIE-V, a child of ATCn_USB_AON). It is not described: the
++ *    driver takes a single power domain, and the port works without it while
++ *    the USB4 port itself is up.
++ */
++
++/ {
++	soc {
++		apciec0_dart: iommu@3a1008000 {
++			compatible = "apple,t8103-usb4-dart";
++			reg = <0x3 0xa1008000 0x0 0x4000>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 771 IRQ_TYPE_LEVEL_HIGH>;
++			#iommu-cells = <1>;
++			power-domains = <&ps_atc0_pcie>;
++			clocks = <&apciec0>;
++			status = "disabled";
++		};
++
++		apciec0: pcie@3b0000000 {
++			compatible = "apple,t8103-apciec", "apple,t6000-apciec";
++			device_type = "pci";
++			reg = <0x3 0xb0000000 0x0 0x10000000>,
++				<0x3 0xa0000000 0x0 0x4000>,
++				<0x3 0xa1000000 0x0 0x8000>,
++				<0x3 0xa0004000 0x0 0x4000>,
++				<0x3 0xa0200000 0x0 0x4000>;
++			reg-names = "config", "rc", "port", "fabric", "debug";
++
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 770 IRQ_TYPE_LEVEL_HIGH>;
++
++			msi-controller;
++			msi-parent = <&apciec0>;
++			msi-ranges = <&aic AIC_IRQ 738 IRQ_TYPE_EDGE_RISING 32>;
++
++			/* all functions behind the port share one stream */
++			iommu-map = <0 &apciec0_dart 1 1>;
++			iommu-map-mask = <0>;
++
++			power-domains = <&ps_atc0_pcie>;
++			#clock-cells = <0>;
++			dma-coherent;
++
++			bus-range = <0 255>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			ranges = <0x43000000 0x4 0x00000000 0x4 0x00000000 0x0 0x80000000>,
++				<0x02000000 0x0 0x80000000 0x4 0x80000000 0x0 0x40000000>,
++				<0x42000000 0x0 0xc0000000 0x4 0xc0000000 0x0 0x3ff00000>;
++			status = "disabled";
++
++			/* must stay the first child: the bootloader fills its tunables */
++			apciec0_port: pci@0,0 {
++				device_type = "pci";
++				reg = <0x0 0x0 0x0 0x0 0x0>;
++				#address-cells = <3>;
++				#size-cells = <2>;
++				ranges;
++			};
++		};
++
++		apciec1_dart: iommu@521008000 {
++			compatible = "apple,t8103-usb4-dart";
++			reg = <0x5 0x21008000 0x0 0x4000>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 851 IRQ_TYPE_LEVEL_HIGH>;
++			#iommu-cells = <1>;
++			power-domains = <&ps_atc1_pcie>;
++			clocks = <&apciec1>;
++			status = "disabled";
++		};
++
++		apciec1: pcie@530000000 {
++			compatible = "apple,t8103-apciec", "apple,t6000-apciec";
++			device_type = "pci";
++			reg = <0x5 0x30000000 0x0 0x10000000>,
++				<0x5 0x20000000 0x0 0x4000>,
++				<0x5 0x21000000 0x0 0x8000>,
++				<0x5 0x20004000 0x0 0x4000>,
++				<0x5 0x20200000 0x0 0x4000>;
++			reg-names = "config", "rc", "port", "fabric", "debug";
++
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 850 IRQ_TYPE_LEVEL_HIGH>;
++
++			msi-controller;
++			msi-parent = <&apciec1>;
++			msi-ranges = <&aic AIC_IRQ 818 IRQ_TYPE_EDGE_RISING 32>;
++
++			iommu-map = <0 &apciec1_dart 1 1>;
++			iommu-map-mask = <0>;
++
++			power-domains = <&ps_atc1_pcie>;
++			#clock-cells = <0>;
++			dma-coherent;
++
++			bus-range = <0 255>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			ranges = <0x43000000 0x5 0x80000000 0x5 0x80000000 0x0 0x80000000>,
++				<0x02000000 0x0 0x00100000 0x6 0x00100000 0x0 0x3ff00000>,
++				<0x42000000 0x0 0x40000000 0x6 0x40000000 0x0 0x40000000>;
++			status = "disabled";
++
++			apciec1_port: pci@0,0 {
++				device_type = "pci";
++				reg = <0x0 0x0 0x0 0x0 0x0>;
++				#address-cells = <3>;
++				#size-cells = <2>;
++				ranges;
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/apple/t8103.dtsi b/arch/arm64/boot/dts/apple/t8103.dtsi
+index e3a91f893107..a57de698bfb5 100644
+--- a/arch/arm64/boot/dts/apple/t8103.dtsi
++++ b/arch/arm64/boot/dts/apple/t8103.dtsi
+@@ -1983,4 +1983,5 @@ port02: pci@2,0 {
+ };
+ 
+ #include "t8103-pmgr.dtsi"
++#include "t8103-apciec.dtsi"
+ #include "hwmon-common.dtsi"
+-- 
+2.56.0
+

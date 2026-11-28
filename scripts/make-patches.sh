@@ -48,6 +48,10 @@ a PCIe tunnel over the USB4 link. Describe these controllers. The port's
 DART only responds while the port application clock runs, so the
 controller is a clock provider and the DART references that clock.
 
+The T8103 (M1) has the same controller behind its two USB4 ports and is
+driven as a T6000 one ("apple,t8103-apciec", "apple,t6000-apciec"); its
+DART is an apple,t8103-usb4-dart.
+
 The register tunables are filled in by the bootloader.
 
 $trailer
@@ -98,7 +102,8 @@ would first unbind the DART (a consumer of its clock), whose device links
 unbind the PCI functions parents first, and a bridge losing its driver stops
 forwarding DMA for the functions below it.
 
-Tested on a Mac Studio (M1 Max) with an ASM2464PD NVMe enclosure.
+Tested on a Mac Studio (M1 Max) with an ASM2464PD NVMe enclosure, and on
+an M1 Mac mini with a Thunderbolt 3 10GbE adapter.
 
 $trailer
 EOF
@@ -145,6 +150,43 @@ t600x-j375.dtsi are shared with T602x boards that have no such controllers.
 $trailer
 EOF
 
+# 5, 6: T8103 (M1), contributed in PR #2. The soc node of t8103.dtsi has
+# no label, so t8103-apciec.dtsi extends /soc by path; it is included after
+# the pmgr nodes it references.
+t8103_author='jshay21 <5350197+jshay21@users.noreply.github.com>'
+t8103_trailer='Assisted-by: Claude:claude-fable-5-2
+Signed-off-by: aquarat <3090997+aquarat@users.noreply.github.com>'
+cp "$src/arch/arm64/boot/dts/apple/t8103-apciec.dtsi" arch/arm64/boot/dts/apple/
+ins_after arch/arm64/boot/dts/apple/t8103.dtsi '^#include "t8103-pmgr.dtsi"$' \
+	'#include "t8103-apciec.dtsi"'
+git add arch/arm64/boot/dts/apple
+gc --author="$t8103_author" -F - <<EOF
+arm64: dts: apple: t8103: Add tunnelled PCIe controllers
+
+Add the tunnelled PCIe root complexes of USB4 ports 0-1 and their DARTs,
+disabled. The values are those of the Apple device tree of an M1 Mac mini.
+Compared with the T600x nodes, the DART is an apple,t8103-usb4-dart
+(T8020-type, 64 stream IDs), the MMIO windows are smaller and differ
+between the ports, the last 1 MiB of port 0's 32-bit prefetchable window is
+left out to keep BARs off the MSI doorbell, and AIC specifiers have three
+cells.
+
+$t8103_trailer
+EOF
+
+board_inc t8103-j274-apciec.dtsi t8103-j274.dts
+git add arch/arm64/boot/dts/apple
+gc --author="$t8103_author" -F - <<EOF
+arm64: dts: apple: t8103-j274: Enable tunnelled PCIe
+
+Enable the tunnelled PCIe controllers of both USB4 ports of the M1 Mac mini
+and add the usb4_N_pcie aliases the bootloader uses to fill in their
+tunables. Tested on port 1 with a Thunderbolt 3 10GbE adapter (JHL7440,
+AQC113): 9.4 Gbit/s both ways. The other T8103 boards are untested.
+
+$t8103_trailer
+EOF
+
 rm -rf "$out"
-git format-patch -q -4 -o "$out"
+git format-patch -q -6 -o "$out"
 ls "$out"
